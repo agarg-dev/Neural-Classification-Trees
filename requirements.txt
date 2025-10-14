@@ -1,0 +1,12 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+Pillow>=8.3.0
+
+# Optional dependencies for enhanced functionality
+tqdm>=4.62.0
+matplotlib>=3.4.0
+seaborn>=0.11.0
