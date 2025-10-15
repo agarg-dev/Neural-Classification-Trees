@@ -9,7 +9,7 @@ import copy
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from typing import Optional, Dict, Any, Tuple
 import numpy as np
 from tqdm import tqdm
@@ -48,7 +48,7 @@ class NCTTrainer:
         self.config = config
         self.logger = logger
 
-        self.scaler = GradScaler()
+        self.scaler = GradScaler('cuda')
         self.best_val_loss = float('inf')
         self.patience_counter = 0
         self.best_model_weights = None
@@ -332,7 +332,7 @@ class NCTTrainer:
                 if is_training:
                     optimizer.zero_grad()
 
-                with autocast():
+                with autocast('cuda'):
                     outputs = self.model(images)
                     loss = weighted_bce_loss(outputs, labels, class_weights)
 

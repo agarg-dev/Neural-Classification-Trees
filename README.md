@@ -1,23 +1,10 @@
-# NCT: Neural Classification Tree Library
+# NCT: Neural Classification Tree
 
-A hierarchical classification library for image datasets using iterative training and refinement.
+A hierarchical classification library implementing iterative training and refinement for image datasets.
 
 ## Overview
 
-The Neural Classification Tree (NCT) library provides a hierarchical approach to image classification that iteratively refines predictions by building a tree-like structure. This approach is particularly useful for:
-
-- **Handling challenging samples**: Difficult-to-classify samples get specialized attention in deeper parts of the hierarchy
-- **Improving fairness**: Better performance across different subgroups/demographics
-- **Interpretable predictions**: Clear decision paths through the hierarchical structure
-
-## Key Features
-
-- **🎯 Generic**: Works with any image classification dataset
-- **🔧 Easy to use**: Scikit-learn-like API (`fit`, `predict`, `evaluate`)
-- **📊 Comprehensive evaluation**: Built-in fairness and group-wise metrics
-- **🏗️ Modular design**: Clean, extensible architecture
-- **⚡ Efficient**: Two-phase training with backbone freezing and fine-tuning
-- **🎨 Flexible**: Support for multiple data formats and backbones
+Neural Classification Tree (NCT) is a hierarchical approach to binary image classification. The method iteratively trains a tree structure where difficult-to-classify samples are routed to specialized nodes in deeper levels of the hierarchy. This approach can improve performance on challenging subgroups within datasets.
 
 ## Installation
 
@@ -34,84 +21,86 @@ pip install torch torchvision scikit-learn pandas numpy pillow
 
 ```python
 from nct import NCTClassifier
+from torch.utils.data import Dataset
 
 # Initialize the classifier
-nct = NCTClassifier(
+classifier = NCTClassifier(
     num_iterations=3,
     epochs_per_iteration=[20, 20, 20],
     backbone='resnet50',
     batch_size=32
 )
 
-# Train on your data
-nct.fit(train_images, train_labels, val_images, val_labels)
+# Train on PyTorch Dataset objects
+classifier.fit(
+    X_train=train_dataset,
+    X_val=val_dataset
+)
 
-# Make predictions
-predictions = nct.predict(test_images)
-probabilities = nct.predict_proba(test_images)
-
-# Evaluate performance
-results = nct.evaluate(test_images, test_labels,
-                      group_labels=test_groups)
+# Evaluate
+results = classifier.evaluate(
+    X_test=test_dataset,
+    group_labels=test_groups
+)
 ```
 
-## Supported Data Formats
+## Data Format
 
-The NCT library supports multiple input formats:
+NCT requires PyTorch Dataset objects as input. Your dataset should implement:
+- `__len__()`: Returns the number of samples
+- `__getitem__(idx)`: Returns a tuple of (image_tensor, label)
 
-### 1. Directory Structure
-```
-data/
-├── class_0/
-│   ├── image1.jpg
-│   └── image2.jpg
-└── class_1/
-    ├── image3.jpg
-    └── image4.jpg
-```
+Example:
 
 ```python
-nct.fit("path/to/data")
-```
+from torch.utils.data import Dataset
+from torchvision import transforms
+from PIL import Image
 
-### 2. Pandas DataFrame
-```python
-import pandas as pd
+class CustomDataset(Dataset):
+    def __init__(self, image_paths, labels, transform=None):
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
 
-df = pd.DataFrame({
-    'image_path': ['img1.jpg', 'img2.jpg', ...],
-    'label': [0, 1, ...]
-})
-nct.fit(df)
-```
+    def __len__(self):
+        return len(self.image_paths)
 
-### 3. Arrays/Lists
-```python
-image_paths = ['img1.jpg', 'img2.jpg', ...]
-labels = [0, 1, ...]
-nct.fit(image_paths, labels)
-```
+    def __getitem__(self, idx):
+        image = Image.open(self.image_paths[idx]).convert('RGB')
+        label = self.labels[idx]
 
-### 4. PyTorch Tensors
-```python
-images = torch.randn(1000, 3, 224, 224)  # Example tensor
-labels = torch.randint(0, 2, (1000,))
-nct.fit(images, labels)
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+# Define transforms
+transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.CenterCrop((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                       std=[0.229, 0.224, 0.225])
+])
+
+# Create dataset
+dataset = CustomDataset(image_paths, labels, transform=transform)
 ```
 
 ## Configuration
 
-Customize the model with `NCTConfig`:
+Customize training with configuration parameters:
 
 ```python
-from nct import NCTClassifier, NCTConfig
+from nct import NCTClassifier
 
-config = NCTConfig(
+classifier = NCTClassifier(
     num_iterations=3,
     epochs_per_iteration=[30, 20, 15],
     batch_size=64,
-    initial_base_lr=1e-4,
-    initial_head_lr=1e-3,
+    initial_base_lr=1e-5,
+    initial_head_lr=1e-5,
     lr_decay_factor=2.0,
     backbone='resnet50',
     pretrained=True,
@@ -119,132 +108,184 @@ config = NCTConfig(
     optimizer_type='adamw',
     image_size=224,
     patience=15,
-    verbose=True
+    phase1_epochs_ratio=0.5,
+    seed=42,
+    verbose=2
 )
-
-nct = NCTClassifier(**config.to_dict())
 ```
 
-## Architecture
+### Key Parameters
 
-The NCT library is organized into several modules:
+- `num_iterations`: Number of hierarchical levels (default: 3)
+- `epochs_per_iteration`: List of training epochs per iteration (default: [20, 20, 20])
+- `batch_size`: Batch size for training and inference (default: 32)
+- `initial_base_lr`: Learning rate for backbone network (default: 1e-5)
+- `initial_head_lr`: Learning rate for classification heads (default: 1e-5)
+- `lr_decay_factor`: Factor to divide learning rate by each iteration (default: 2.0)
+- `backbone`: CNN architecture ('resnet50', 'resnet18', etc.)
+- `phase1_epochs_ratio`: Fraction of epochs for phase 1 frozen backbone training (default: 0.5)
+- `patience`: Early stopping patience epochs (default: 15)
+- `verbose`: Logging verbosity (0=silent, 1=basic, 2=detailed)
 
+## Training
+
+The `fit()` method trains the hierarchical classifier:
+
+```python
+classifier.fit(
+    X_train=train_dataset,      # PyTorch Dataset
+    X_val=val_dataset,          # PyTorch Dataset
+    X_test=test_dataset,        # Optional: for per-iteration evaluation
+    group_labels=group_labels,  # Optional: group labels for test set
+    dataset_name="waterbird"    # Optional: dataset name for logging
+)
 ```
-nct/
-├── core/           # Main API classes
-├── data/           # Data handling and loading
-├── models/         # Neural network architectures
-├── training/       # Training loops and optimization
-├── evaluation/     # Metrics and analysis
-└── utils/          # Utilities (seeding, device management)
-```
 
-### Key Components
+### Two-Phase Training
 
-- **NCTClassifier**: Main API class with sklearn-like interface
-- **HierarchicalClassifier**: Neural network with shared backbone + multiple heads
-- **NCTTrainer**: Two-phase training (frozen backbone → full fine-tuning)
-- **Evaluation suite**: Comprehensive metrics including fairness analysis
+Each iteration uses a two-phase training strategy:
+1. **Phase 1**: Train classification heads with frozen backbone
+2. **Phase 2**: Fine-tune the entire model (backbone + heads)
 
-## How It Works
-
-1. **Initial Training**: Train a 2-class classifier (binary split)
-2. **Label Update**: Samples are routed to "easy" or "hard" branches based on correctness
-3. **Hierarchical Expansion**: Each node splits into 2 children (easy/hard)
-4. **Iterative Refinement**: Repeat for specified number of iterations
-5. **Final Prediction**: Route through the tree to get final classification
-
-```
-Iteration 1:     [Root]
-                /      \
-         Class 0          Class 1
-
-Iteration 2:     [Root]
-                /      \
-        [Class 0]      [Class 1]
-         /     \        /     \
-    C0-Easy  C0-Hard  C1-Easy  C1-Hard
-
-... and so on
-```
+The split between phases is controlled by `phase1_epochs_ratio` (default: 0.5 for 50-50 split).
 
 ## Evaluation
 
-The library provides comprehensive evaluation metrics:
+The `evaluate()` method provides comprehensive metrics:
 
 ```python
-results = nct.evaluate(test_data, test_labels,
-                      group_labels=group_labels,
-                      group_names={0: "Group A", 1: "Group B", ...})
+results = classifier.evaluate(
+    X_test=test_dataset,
+    group_labels=group_labels,
+    dataset_name="waterbird"
+)
 
-# Access different metrics
-print(results['basic_metrics'])      # Accuracy, F1, etc.
+# Access results
+print(results['basic_metrics'])      # Accuracy, precision, recall, F1
 print(results['group_metrics'])      # Per-group performance
-print(results['node_analysis'])      # Hierarchical structure analysis
-print(results['node_utilization'])   # How many nodes are used
+print(results['node_analysis'])      # Hierarchical structure info
+print(results['node_utilization'])   # Node usage statistics
 ```
 
-## Examples
+### Metrics
 
-See `example_usage.py` for comprehensive examples including:
+**Basic Metrics:**
+- Accuracy
+- Precision, Recall, F1 Score
+- Balanced Accuracy
 
-- Basic usage with dummy data
-- Custom configuration
-- Different data formats
-- Model saving/loading
-- Evaluation and analysis
+**Group Metrics** (when group_labels provided):
+- Per-group accuracy
+- Worst-group accuracy
+- Average group accuracy
+- Group-wise confusion matrices
 
-Run the examples:
+## How It Works
+
+1. **Iteration 1**: Train a binary classifier on original labels
+2. **Label Update**: Route samples based on prediction correctness
+   - Correctly classified → "easy" branch (label 0)
+   - Incorrectly classified → "hard" branch (label 1)
+3. **Iteration 2+**: Train new classifiers on each branch
+4. **Prediction**: Route test samples through the tree hierarchy
+
+Example hierarchy structure:
+
+```
+Iteration 1:           [Root: 2 nodes]
+                      /              \
+               Class 0 (node 0)   Class 1 (node 1)
+
+Iteration 2:           [Root: 4 nodes]
+                      /              \
+            [Class 0 Node]      [Class 1 Node]
+               /      \            /      \
+           Easy 0   Hard 0     Easy 1   Hard 1
+```
+
+## Running an Example
+
+The `src/nct_package_main.py` script demonstrates usage on the Waterbirds dataset:
+
 ```bash
-python example_usage.py
+python src/nct_package_main.py \
+    --data_dir ./data \
+    --num_iterations 3 \
+    --epochs_per_iteration 20 20 20 \
+    --initial_base_lr 1e-4 \
+    --initial_head_lr 1e-3 \
+    --batch_size 32 \
+    --seed 42
+```
+
+### Command-Line Arguments
+
+- `--data_dir`: Directory containing the dataset
+- `--num_iterations`: Number of training iterations
+- `--epochs_per_iteration`: Epochs for each iteration (space-separated)
+- `--initial_base_lr`: Initial learning rate for backbone
+- `--initial_head_lr`: Initial learning rate for heads
+- `--lr_decay_factor`: LR decay factor between iterations
+- `--batch_size`: Training batch size
+- `--weight_decay`: Weight decay for optimizer
+- `--seed`: Random seed for reproducibility
+- `--phase1_epochs_ratio`: Ratio of epochs for frozen backbone phase
+
+## Package Structure
+
+```
+nct/
+├── core/
+│   ├── classifier.py      # Main NCTClassifier API
+│   └── config.py          # NCTConfig dataclass
+├── data/
+│   ├── datasets.py        # IterativeDataset implementation
+│   └── loaders.py         # DataLoader creation utilities
+├── models/
+│   ├── hierarchical.py    # HierarchicalClassifier model
+│   └── utils.py           # Model initialization utilities
+├── training/
+│   ├── trainer.py         # NCTTrainer training loops
+│   ├── optimizer.py       # Optimizer and scheduler creation
+│   └── loss.py            # Loss functions and class weights
+├── evaluation/
+│   ├── metrics.py         # Metric calculation functions
+│   └── analysis.py        # Hierarchical analysis utilities
+└── utils/
+    ├── seed.py            # Random seed management
+    ├── device.py          # Device detection
+    └── logger.py          # Logging utilities
 ```
 
 ## API Reference
 
 ### NCTClassifier
 
-**Methods:**
-- `fit(X_train, y_train, X_val=None, y_val=None)`: Train the model
-- `predict(X)`: Make binary predictions
-- `predict_proba(X)`: Get prediction probabilities
-- `evaluate(X_test, y_test, group_labels=None)`: Comprehensive evaluation
-- `save_model(filepath)`: Save trained model
-- `load_model(filepath)`: Load trained model
+**Main Methods:**
 
-**Parameters:**
-- `num_iterations`: Number of hierarchical levels (default: 3)
-- `epochs_per_iteration`: Training epochs per iteration (default: [20, 20, 20])
-- `backbone`: CNN backbone ('resnet50', 'resnet18', etc.)
-- `batch_size`: Training batch size (default: 32)
-- `initial_base_lr`: Learning rate for backbone (default: 1e-4)
-- `initial_head_lr`: Learning rate for classification heads (default: 1e-3)
-- `device`: Training device ('auto', 'cuda', 'cpu')
+- `fit(X_train, X_val, X_test=None, group_labels=None, dataset_name="generic")`: Train the model
+- `evaluate(X_test, group_labels=None, dataset_name="generic")`: Evaluate on test set
+- `save_model(filepath)`: Save trained model to disk
+- `load_model(filepath)`: Load trained model from disk
 
 ### NCTConfig
 
-Configuration dataclass with validation and serialization support.
+Configuration dataclass with validation and serialization support. All parameters can be passed directly to `NCTClassifier.__init__()` or accessed via `classifier.config`.
 
-## Contributing
+## Requirements
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+- Python 3.8+
+- PyTorch 2.0+
+- torchvision
+- scikit-learn
+- pandas
+- numpy
+- Pillow
 
 ## License
 
-[Add your license here]
+-
 
 ## Citation
 
-If you use this library in your research, please cite:
-
-```bibtex
-@software{nct_library,
-  title={NCT: Neural Classification Tree Library},
-  author={[Your Name]},
-  year={2024},
-  url={[Repository URL]}
-}
-```
+-

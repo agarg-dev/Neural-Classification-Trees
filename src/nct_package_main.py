@@ -191,7 +191,7 @@ def main():
 
     if 'group_metrics' in results:
         group_metrics = results['group_metrics']
-        print(f"  Worst Group Accuracy: {group_metrics['worst_group_accuracy']:.2%}")
+        print(f"  Worst Group Accuracy: {group_metrics['summary']['worst_group_accuracy']:.2%}")
 
 
 if __name__ == '__main__':
