@@ -39,17 +39,19 @@ def weighted_bce_loss(
 
 def compute_class_weights(
     labels: torch.Tensor,
-    num_classes: int,
-    method: str = 'inverse_frequency'
+    num_classes: int
 ) -> torch.Tensor:
     """
-    Compute class weights for imbalanced datasets.
+    Compute balanced class weights for imbalanced datasets.
+
+    Uses the balanced weighting formula: total_samples / (num_classes * class_counts)
+    This ensures minority classes receive higher weights proportional to their rarity.
+
     Args:
         labels: Training labels
         num_classes: Number of classes
-        method: Method for computing weights ('inverse_frequency', 'balanced')
     Returns:
-        torch.Tensor: Class weights
+        torch.Tensor: Balanced class weights
     """
     # Count occurrences of each class
     class_counts = torch.bincount(labels, minlength=num_classes).float()
@@ -57,15 +59,8 @@ def compute_class_weights(
     # Avoid division by zero
     class_counts = class_counts.clamp(min=1)
 
-    if method == 'inverse_frequency':
-        # Inverse frequency weighting
-        total_samples = len(labels)
-        class_weights = total_samples / (num_classes * class_counts)
-    elif method == 'balanced':
-        # Balanced class weights
-        total_samples = len(labels)
-        class_weights = total_samples / (num_classes * class_counts)
-    else:
-        raise ValueError(f"Unknown weighting method: {method}")
+    # Balanced class weights
+    total_samples = len(labels)
+    class_weights = total_samples / (num_classes * class_counts)
 
     return class_weights

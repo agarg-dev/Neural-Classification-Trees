@@ -5,7 +5,7 @@ A hierarchical classification library for image datasets using iterative trainin
 """
 
 from .core.classifier import NCTClassifier
-from .core.config import NCTConfig
+from .core.config import NCTConfig, OptimizerConfig, SchedulerConfig
 
 __version__ = "0.1.0"
 __author__ = "NCT Team"
@@ -13,4 +13,6 @@ __author__ = "NCT Team"
 __all__ = [
     "NCTClassifier",
     "NCTConfig",
+    "OptimizerConfig",
+    "SchedulerConfig",
 ]

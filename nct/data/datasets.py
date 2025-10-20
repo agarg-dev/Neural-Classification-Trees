@@ -2,7 +2,7 @@
 
 import torch
 from torch.utils.data import Dataset
-from typing import Tuple
+from typing import Tuple, Any
 
 
 class IterativeDataset(Dataset):
@@ -25,3 +25,30 @@ class IterativeDataset(Dataset):
         if isinstance(hier_label, torch.Tensor):
             hier_label = hier_label.item()
         return image, hier_label
+
+
+def extract_labels_from_dataset(dataset: Any) -> torch.Tensor:
+    """
+    Extract all labels directly from a dataset.
+
+    This function handles multiple dataset formats:
+    - Datasets with metadata DataFrame (e.g., WILDS datasets)
+    - Datasets with a labels attribute
+    - Generic datasets via iteration
+
+    Args:
+        dataset: PyTorch Dataset to extract labels from.
+
+    Returns:
+        Tensor containing all labels from the dataset.
+    """
+    if hasattr(dataset, 'metadata') and 'y' in dataset.metadata.columns:
+        return torch.tensor(dataset.metadata['y'].values, dtype=torch.long)
+    elif hasattr(dataset, 'labels'):
+        return torch.tensor(dataset.labels, dtype=torch.long) if not isinstance(dataset.labels, torch.Tensor) else dataset.labels
+    else:
+        labels = []
+        for i in range(len(dataset)):
+            _, label = dataset[i]
+            labels.append(label)
+        return torch.tensor(labels, dtype=torch.long)

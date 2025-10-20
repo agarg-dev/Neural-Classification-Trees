@@ -18,6 +18,7 @@ from torchvision import transforms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nct import NCTClassifier, NCTConfig
+from nct.core.config import OptimizerConfig, SchedulerConfig
 from nct.utils.seed import set_seed
 
 
@@ -36,6 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
     parser.add_argument('--phase1_epochs_ratio', type=float, default=0.5,
                        help='Ratio of epochs for phase 1 (frozen backbone). Default 0.5 for 50:50 split.')
+    parser.add_argument('--phase1_patience', type=int, default=10,
+                       help='Early stopping patience for phase 1.')
+    parser.add_argument('--phase2_patience', type=int, default=10,
+                       help='Early stopping patience for phase 2.')
+    parser.add_argument('--optimizer_type', type=str, default='adamw', help='Type of optimizer to use (e.g., adamw, sgd).')
+    parser.add_argument('--scheduler_type', type=str, default='plateau', help='Type of scheduler to use (e.g., plateau, step).')
+    parser.add_argument('--patience', type=int, default=5, help='Patience for learning rate scheduler.')
+    # parser.add_argument('--scheduler_gamma', type=float, default=0.5, help='Gamma value for step scheduler.')
+    # parser.add_argument('--scheduler_eta_min', type=float, default=1e-6, help='Minimum learning rate for scheduler.')
+
     return parser.parse_args()
 
 
@@ -149,6 +160,17 @@ def main():
     print("Loading Waterbird dataset...")
     data = prepare_waterbird_data(args.data_dir)
 
+    # Create optimizer and scheduler configs
+    optimizer_config = OptimizerConfig(
+        type=args.optimizer_type,
+        weight_decay=args.weight_decay
+    )
+
+    scheduler_config = SchedulerConfig(
+        type=args.scheduler_type,
+        patience=args.patience,
+    )
+
     # Create NCT classifier
     classifier = NCTClassifier(
         num_iterations=args.num_iterations,
@@ -157,9 +179,13 @@ def main():
         initial_base_lr=args.initial_base_lr,
         initial_head_lr=args.initial_head_lr,
         lr_decay_factor=args.lr_decay_factor,
-        weight_decay=args.weight_decay,
+        optimizer=optimizer_config,
+        scheduler=scheduler_config,
         phase1_epochs_ratio=args.phase1_epochs_ratio,
+        phase1_patience=args.phase1_patience,
+        phase2_patience=args.phase2_patience,
         seed=args.seed,
+        use_class_weights=True,
         verbose=2  # Detailed output
     )
 

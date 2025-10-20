@@ -3,6 +3,7 @@
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau, StepLR, CosineAnnealingLR
 from typing import Dict, List, Any, Optional, Union
+from ..core.config import OptimizerConfig, SchedulerConfig
 
 try:
     from transformers import get_cosine_schedule_with_warmup
@@ -13,53 +14,51 @@ except ImportError:
 
 def create_optimizer(
     parameters: Union[List[Dict], List[Any]],
-    optimizer_type: str = 'adamw',
-    learning_rate: float = 1e-3,
-    weight_decay: float = 1e-4,
-    **optimizer_kwargs
+    config: OptimizerConfig,
+    learning_rate: float = 1e-3
 ) -> optim.Optimizer:
     """
     Create an optimizer with specified parameters.
+
     Args:
         parameters: Model parameters or parameter groups
-        optimizer_type: Type of optimizer ('adamw', 'adam', 'sgd', 'rmsprop')
-        learning_rate: Learning rate
-        weight_decay: Weight decay
-        **optimizer_kwargs: Additional optimizer arguments
+        config: OptimizerConfig object with all hyperparameters
+        learning_rate: Learning rate (overrides config if provided)
+
     Returns:
         torch.optim.Optimizer: Configured optimizer
     """
-    optimizer_type = optimizer_type.lower()
+    optimizer_type = config.type.lower()
 
     if optimizer_type == 'adamw':
         return optim.AdamW(
             parameters,
             lr=learning_rate,
-            weight_decay=weight_decay,
-            **optimizer_kwargs
+            weight_decay=config.weight_decay,
+            betas=config.betas,
+            eps=config.eps
         )
     elif optimizer_type == 'adam':
         return optim.Adam(
             parameters,
             lr=learning_rate,
-            weight_decay=weight_decay,
-            **optimizer_kwargs
+            weight_decay=config.weight_decay,
+            betas=config.betas,
+            eps=config.eps
         )
     elif optimizer_type == 'sgd':
-        momentum = optimizer_kwargs.pop('momentum', 0.9)
         return optim.SGD(
             parameters,
             lr=learning_rate,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            **optimizer_kwargs
+            weight_decay=config.weight_decay,
+            momentum=config.momentum,
+            nesterov=config.nesterov
         )
     elif optimizer_type == 'rmsprop':
         return optim.RMSprop(
             parameters,
             lr=learning_rate,
-            weight_decay=weight_decay,
-            **optimizer_kwargs
+            weight_decay=config.weight_decay
         )
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
@@ -69,19 +68,17 @@ def create_two_stage_optimizer(
     model_parameters: Dict[str, List],
     base_lr: float,
     head_lr: float,
-    optimizer_type: str = 'adamw',
-    weight_decay: float = 1e-4,
-    **optimizer_kwargs
+    config: OptimizerConfig
 ) -> optim.Optimizer:
     """
     Create optimizer with different learning rates for backbone and heads.
+
     Args:
         model_parameters: Dict with 'base' and 'heads' parameter lists
         base_lr: Learning rate for backbone
         head_lr: Learning rate for heads
-        optimizer_type: Optimizer type
-        weight_decay: Weight decay
-        **optimizer_kwargs: Additional optimizer arguments
+        config: OptimizerConfig object with all hyperparameters
+
     Returns:
         torch.optim.Optimizer: Configured optimizer with parameter groups
     """
@@ -89,66 +86,67 @@ def create_two_stage_optimizer(
         {'params': model_parameters['base'], 'lr': base_lr},
         {'params': model_parameters['heads'], 'lr': head_lr}
     ]
-
     return create_optimizer(
         param_groups,
-        optimizer_type=optimizer_type,
-        learning_rate=head_lr,  # Default LR (will be overridden by param groups)
-        weight_decay=weight_decay,
-        **optimizer_kwargs
+        config=config,
+        learning_rate=head_lr  # Default LR (will be overridden by param groups)
     )
+
 
 
 def create_scheduler(
     optimizer: optim.Optimizer,
-    scheduler_type: str = 'plateau',
-    **scheduler_kwargs
+    config: SchedulerConfig,
+    num_epochs: Optional[int] = None,
+    steps_per_epoch: Optional[int] = None
 ) -> Optional[Any]:
     """
-    Create a learning rate scheduler.
+    Create a learning rate scheduler with dynamic hyperparameter calculation.
+
     Args:
         optimizer: PyTorch optimizer
-        scheduler_type: Type of scheduler ('plateau', 'step', 'cosine', 'none')
-        **scheduler_kwargs: Additional scheduler arguments
+        config: SchedulerConfig object with all hyperparameters
+        num_epochs: Number of epochs for this training phase (used for auto-calculation)
+        steps_per_epoch: Number of steps per epoch (used for step-based schedulers)
+
     Returns:
         Optional scheduler object
+
+    Notes:
+        - If num_epochs is provided, hyperparameters are auto-calculated based on training duration
+        - Config values are used as fallbacks if auto-calculation isn't possible
+        - For 'cosine_warmup', steps_per_epoch is required for auto-calculation
     """
-    scheduler_type = scheduler_type.lower()
+    scheduler_type = config.type.lower()
+
+    if scheduler_type == 'none':
+        return None
 
     if scheduler_type == 'plateau':
-        return ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=scheduler_kwargs.get('factor', 0.5),
-            patience=scheduler_kwargs.get('patience', 3)
-        )
-    elif scheduler_type == 'step':
-        return StepLR(
-            optimizer,
-            step_size=scheduler_kwargs.get('step_size', 10),
-            gamma=scheduler_kwargs.get('gamma', 0.1)
-        )
-    elif scheduler_type == 'cosine':
-        return CosineAnnealingLR(
-            optimizer,
-            T_max=scheduler_kwargs.get('T_max', 50),
-            eta_min=scheduler_kwargs.get('eta_min', 0)
-        )
-    elif scheduler_type == 'cosine_warmup':
+        patience = config.patience if config.patience != -1 else int(config.plateau_patience_ratio * num_epochs)
+        return ReduceLROnPlateau(optimizer, mode='min', factor=config.factor, patience=patience)
+
+    if scheduler_type == 'step':
+        step_size = config.step_size if config.step_size != -1 else int(config.step_size_ratio * num_epochs)
+        return StepLR(optimizer, step_size=step_size, gamma=config.gamma)
+
+    if scheduler_type == 'cosine':
+        T_max = config.T_max if config.T_max != -1 else num_epochs
+        return CosineAnnealingLR(optimizer, T_max=T_max, eta_min=config.eta_min)
+
+    if scheduler_type == 'cosine_warmup':
         if not TRANSFORMERS_AVAILABLE:
             raise ImportError(
                 "transformers library is required for cosine_warmup scheduler. "
                 "Install with: pip install transformers"
             )
-        return get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=scheduler_kwargs.get('num_warmup_steps', 100),
-            num_training_steps=scheduler_kwargs.get('num_training_steps', 1000)
-        )
-    elif scheduler_type == 'none':
-        return None
-    else:
-        raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+
+        training_steps = config.num_training_steps if config.num_training_steps != -1 else num_epochs * steps_per_epoch
+        warmup_steps = config.num_warmup_steps if config.num_warmup_steps != -1 else int(config.warmup_ratio * training_steps)
+
+        return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=training_steps)
+
+    raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
 
 
 def adjust_learning_rate(
@@ -192,26 +190,3 @@ def get_current_learning_rates(optimizer: optim.Optimizer) -> List[float]:
     """
     return [param_group['lr'] for param_group in optimizer.param_groups]
 
-
-def warmup_learning_rate(
-    optimizer: optim.Optimizer,
-    current_step: int,
-    warmup_steps: int,
-    base_lr: float
-) -> None:
-    """
-    Apply learning rate warmup.
-    Args:
-        optimizer: PyTorch optimizer
-        current_step: Current training step
-        warmup_steps: Number of warmup steps
-        base_lr: Target learning rate after warmup
-    """
-    if current_step < warmup_steps:
-        warmup_factor = current_step / warmup_steps
-        current_lr = base_lr * warmup_factor
-
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
-
-            
