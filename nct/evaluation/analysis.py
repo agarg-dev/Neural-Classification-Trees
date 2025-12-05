@@ -3,74 +3,83 @@
 import torch
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
+from ..utils.hierarchical import get_node_class, get_node_class_correct_label
+
+# Export get_node_label for use in other modules
+__all__ = ['get_node_label', 'analyze_hierarchical_results']
 
 
-def get_path_description(node_index: int, num_iterations: int, is_waterbird: bool = False) -> str:
+def get_node_label(
+    node_index: int, 
+    num_iterations: int, 
+    class_names: Optional[List[str]] = None,
+    hierarchical: str = "none"
+) -> str:
     """
-    Generate a description of the hierarchical path for a given node.
+    Generate a hierarchical label for a given node.
+    
+    This is a general-purpose label generator used across evaluation, visualization,
+    and logging. Supports custom class names.
+    
     Args:
         node_index: Index of the final node
         num_iterations: Number of iterations in the hierarchy
-        is_waterbird: Whether this is Waterbird dataset specific
+        class_names: Optional list of class names (e.g., ['Landbird', 'Waterbird']).
+                    If None, uses 'Class 0', 'Class 1', etc.
+        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
+    
     Returns:
-        str: Human-readable path description
+        str: Human-readable hierarchical label with arrow separators
+        
+    Examples:
+        >>> get_node_label(3, 2, ['Landbird', 'Waterbird'])
+        'Waterbird → Difficult'
+        >>> get_node_label(1, 1, ['Cat', 'Dog'])
+        'Dog'
+        >>> get_node_label(5, 3, ['Cat', 'Dog'])
+        'Dog → Easy → Difficult'
     """
     if num_iterations <= 0:
         return f"Node {node_index}"
 
     final_num_nodes = 2 ** num_iterations
-    predicts_class_1 = node_index >= final_num_nodes // 2
+    
+    # Determine which class this node predicts
+    if hierarchical == "prediction_routing":
+        pred_class = get_node_class(node_index, num_iterations)
+    elif hierarchical == "correct_label_routing":
+        pred_class = get_node_class_correct_label(node_index, num_iterations)
+    else:  # "none"
+        pred_class = 1 if node_index >= final_num_nodes // 2 else 0
 
-    if is_waterbird:
-        # Waterbird-specific path descriptions
-        if num_iterations == 1:
-            return "Land Bird" if node_index == 0 else "Water Bird"
-        elif num_iterations == 2:
-            # 4 nodes: specialized descriptions
-            if node_index == 0:
-                return "Land Bird → Easy"
-            elif node_index == 1:
-                return "Land Bird → Difficult"
-            elif node_index == 2:
-                return "Water Bird → Easy"
-            else:  # node_index == 3
-                return "Water Bird → Difficult"
-        elif num_iterations == 3:
-            # 8 nodes: full hierarchy
-            descriptions = {
-                0: "Land Bird → Easy → Easy",
-                1: "Land Bird → Easy → Difficult",
-                2: "Land Bird → Difficult → Easy",
-                3: "Land Bird → Difficult → Difficult",
-                4: "Water Bird → Easy → Easy",
-                5: "Water Bird → Easy → Difficult",
-                6: "Water Bird → Difficult → Easy",
-                7: "Water Bird → Difficult → Difficult"
-            }
-            return descriptions.get(node_index, f"Node {node_index}")
+    # Get class name
+    if class_names is not None and pred_class < len(class_names):
+        class_name = class_names[pred_class]
+    else:
+        class_name = f"Class {pred_class}"
 
-    # Generic path description
-    path = []
+    # Iteration 1: Just return class name
     if num_iterations == 1:
-        return f"Class {'1' if predicts_class_1 else '0'}"
+        return class_name
 
-    path.append(f"Class {'1' if predicts_class_1 else '0'}")
-
-    current_index = node_index
-    for iteration in range(num_iterations - 1, 0, -1):
-        is_hard = (current_index % 2) == 1
-        path.append("Hard" if is_hard else "Easy")
-        current_index = current_index // 2
-
-    return " → ".join(reversed(path))
+    # Iteration 2+: Add Easy/Difficult hierarchy using bit extraction
+    path_parts = [class_name]
+    
+    # Extract difficulty bits in chronological order (high to low bit positions)
+    # This gives: first split, second split, third split, etc.
+    for bit_pos in range(num_iterations - 2, -1, -1):
+        is_difficult = (node_index >> bit_pos) & 1
+        path_parts.append("Difficult" if is_difficult else "Easy")
+    
+    return " → ".join(path_parts)
 
 
 def get_waterbird_group_names() -> Dict[int, str]:
     """Get standard Waterbird dataset group names."""
     return {
         0: "Land Bird on Land (Easy)",
-        1: "Land Bird on Water (Hard)",
-        2: "Water Bird on Land (Hard)",
+        1: "Land Bird on Water (Difficult)",
+        2: "Water Bird on Land (Difficult)",
         3: "Water Bird on Water (Easy)"
     }
 
@@ -89,7 +98,7 @@ def detect_waterbird_dataset(group_labels: Optional[torch.Tensor], group_names: 
     if group_names:
         # Check if group names contain Waterbird-specific terms
         names_str = str(group_names).lower()
-        waterbird_terms = ['bird', 'land', 'water', 'easy', 'hard']
+        waterbird_terms = ['bird', 'land', 'water', 'easy', 'difficult']
         return any(term in names_str for term in waterbird_terms)
 
     if group_labels is not None:
@@ -106,8 +115,9 @@ def analyze_hierarchical_nodes(
     group_labels: Optional[torch.Tensor] = None,
     num_iterations: int = 1,
     group_names: Optional[Dict[int, str]] = None,
-    verbose: bool = True,
-    is_waterbird: bool = False
+    verbose: int = 1,
+    is_waterbird: bool = False,
+    hierarchical: str = "none"
 ) -> Dict[str, Any]:
     """
     Analyze the performance of each node in the hierarchical classifier.
@@ -117,7 +127,9 @@ def analyze_hierarchical_nodes(
         group_labels: Optional group labels for subgroup analysis
         num_iterations: Number of iterations in the hierarchy
         group_names: Optional mapping from group IDs to names
-        verbose: Whether to print detailed analysis
+        verbose: Verbosity level (0=silent, 1=basic, 2=detailed)
+        is_waterbird: Whether this is Waterbird dataset specific
+        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
     Returns:
         Dict[str, Any]: Analysis results
     """
@@ -140,7 +152,7 @@ def analyze_hierarchical_nodes(
     for node_idx in range(final_num_nodes):
         node_info = _analyze_single_node(
             node_idx, predicted_hier_classes, true_binary_labels, group_labels,
-            num_iterations, group_names, is_waterbird, verbose
+            num_iterations, group_names, is_waterbird, verbose, hierarchical
         )
         node_analysis[f'node_{node_idx}'] = node_info
 
@@ -170,7 +182,7 @@ def analyze_hierarchical_nodes(
 def _analyze_single_node(
     node_idx: int, predicted_hier_classes: np.ndarray, true_binary_labels: np.ndarray,
     group_labels: Optional[np.ndarray], num_iterations: int, group_names: Optional[Dict[int, str]],
-    is_waterbird: bool, verbose: bool
+    is_waterbird: bool, verbose: int, hierarchical: str = "none"
 ) -> Dict[str, Any]:
     """Analyze a single node - simple helper to reduce the monster function."""
     mask = (predicted_hier_classes == node_idx)
@@ -178,8 +190,14 @@ def _analyze_single_node(
     final_num_nodes = 2 ** num_iterations
 
     # Basic node info
-    path_str = get_path_description(node_idx, num_iterations, is_waterbird)
-    node_predicts_binary = 1 if node_idx >= final_num_nodes / 2 else 0
+    class_names = ["Land Bird", "Water Bird"] if is_waterbird else None
+    path_str = get_node_label(node_idx, num_iterations, class_names, hierarchical)
+    if hierarchical == "prediction_routing":
+        node_predicts_binary = get_node_class(node_idx, num_iterations)
+    elif hierarchical == "correct_label_routing":
+        node_predicts_binary = get_node_class_correct_label(node_idx, num_iterations)
+    else:  # "none"
+        node_predicts_binary = 1 if node_idx >= final_num_nodes / 2 else 0
     prediction_str = "Water Bird" if (is_waterbird and node_predicts_binary == 1) else \
                     "Land Bird" if (is_waterbird and node_predicts_binary == 0) else \
                     f"Class {node_predicts_binary}"
@@ -300,7 +318,8 @@ def analyze_prediction_paths(
 def generate_hierarchy_visualization_data(
     predicted_hier_classes: torch.Tensor,
     true_binary_labels: torch.Tensor,
-    num_iterations: int
+    num_iterations: int,
+    hierarchical: str = "none"
 ) -> Dict[str, Any]:
     """
     Generate data for visualizing the hierarchical classification results.
@@ -309,6 +328,7 @@ def generate_hierarchy_visualization_data(
         predicted_hier_classes: Predicted hierarchical classes
         true_binary_labels: True binary labels
         num_iterations: Number of iterations
+        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
 
     Returns:
         Dict[str, Any]: Visualization data
@@ -336,7 +356,13 @@ def generate_hierarchy_visualization_data(
                 node_id = f"L{level}_N{node_idx}"
                 mask = (predicted_hier_classes == node_idx)
                 population = np.sum(mask)
-                accuracy = np.mean(true_binary_labels[mask] == (1 if node_idx >= final_num_nodes / 2 else 0)) if population > 0 else 0.0
+                if hierarchical == "prediction_routing":
+                    node_class = get_node_class(node_idx, num_iterations)
+                elif hierarchical == "correct_label_routing":
+                    node_class = get_node_class_correct_label(node_idx, num_iterations)
+                else:  # "none"
+                    node_class = 1 if node_idx >= final_num_nodes / 2 else 0
+                accuracy = np.mean(true_binary_labels[mask] == node_class) if population > 0 else 0.0
             else:
                 # Intermediate levels
                 node_id = f"L{level}_N{node_idx}"

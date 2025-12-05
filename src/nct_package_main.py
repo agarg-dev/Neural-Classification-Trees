@@ -8,6 +8,7 @@ import os
 import sys
 import pandas as pd
 import torch
+from datetime import datetime
 from pathlib import Path
 from PIL import Image
 from typing import Tuple
@@ -33,10 +34,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--initial_head_lr', type=float, default=1e-3, help='Initial learning rate for the output heads.')
     parser.add_argument('--lr_decay_factor', type=float, default=2.0, help='Factor to DIVIDE base LR by between iterations.')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training.')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for optimizer.')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for L2 regularization.')
+    parser.add_argument('--regularization_type', type=str, default='l2',
+                       choices=['l1', 'l2', 'elastic_net', 'none'],
+                       help='Type of regularization: l1, l2, elastic_net, or none.')
+    parser.add_argument('--lambda_l1', type=float, default=0.0, help='L1 regularization coefficient.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
-    parser.add_argument('--phase1_epochs_ratio', type=float, default=0.5,
-                       help='Ratio of epochs for phase 1 (frozen backbone). Default 0.5 for 50:50 split.')
+    parser.add_argument('--phase1_epochs_ratio', type=float, nargs='+', default=[0.5],
+                       help='Ratio of epochs for phase 1. Single value or list (0.0=skip phase1, 1.0=skip phase2).')
     parser.add_argument('--phase1_patience', type=int, default=10,
                        help='Early stopping patience for phase 1.')
     parser.add_argument('--phase2_patience', type=int, default=10,
@@ -44,8 +49,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--optimizer_type', type=str, default='adamw', help='Type of optimizer to use (e.g., adamw, sgd).')
     parser.add_argument('--scheduler_type', type=str, default='plateau', help='Type of scheduler to use (e.g., plateau, step).')
     parser.add_argument('--patience', type=int, default=5, help='Patience for learning rate scheduler.')
+    parser.add_argument('--save_iteration_checkpoints', action='store_true', default=True, help='Save model checkpoints after each iteration.')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints', help='Directory to save iteration checkpoints.')
+    parser.add_argument('--generate_attributions', action='store_true', help='Generate Grad-CAM attribution visualizations.')
+    parser.add_argument('--attribution_dir', type=str, default='./attributions', help='Directory to save attribution visualizations.')
+    parser.add_argument('--num_per_node', type=int, default=5, help='Number of random samples per node for attributions.')
+    parser.add_argument('--num_transitions', type=int, default=5, help='Number of transition samples for attributions.')
     # parser.add_argument('--scheduler_gamma', type=float, default=0.5, help='Gamma value for step scheduler.')
-    # parser.add_argument('--scheduler_eta_min', type=float, default=1e-6, help='Minimum learning rate for scheduler.')
+    parser.add_argument('--scheduler_eta_min', type=float, default=1e-6, help='Minimum learning rate for scheduler.')
+    parser.add_argument('--routing_strategy', type=str, default='argmax', choices=['argmax', 'confidence'],
+                       help='Routing strategy for sample assignment: argmax (correctness only) or confidence (correctness + uncertainty).')
+    parser.add_argument('--confidence_threshold', type=float, default=0.7, help='Confidence threshold for routing (used with confidence strategy).')
+    parser.add_argument('--aux_loss_weight', type=float, default=0.3,
+                       help='Weight for auxiliary parent loss (0.0 = disabled).')
+    parser.add_argument('--hierarchical_architecture', type=str, default='none',
+                        choices=['none', 'prediction_routing', 'correct_label_routing'],
+                        help='Hierarchical architecture mode: none (simple), prediction_routing, or correct_label_routing')
 
     return parser.parse_args()
 
@@ -111,10 +130,13 @@ def prepare_waterbird_data(data_dir: str):
 
     # Define transforms
     train_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.RandomCrop((224, 224)),
+        transforms.RandomResizedCrop(
+            224,
+            scale=(0.7, 1.0),
+            ratio=(0.75, 4.0/3.0),
+            interpolation=2
+        ),
         transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -171,6 +193,9 @@ def main():
         patience=args.patience,
     )
 
+    # Get job ID for wandb run name
+    job_id = os.environ.get('SLURM_JOB_ID', 'local')
+
     # Create NCT classifier
     classifier = NCTClassifier(
         num_iterations=args.num_iterations,
@@ -186,7 +211,23 @@ def main():
         phase2_patience=args.phase2_patience,
         seed=args.seed,
         use_class_weights=True,
-        verbose=2  # Detailed output
+        regularization_type=args.regularization_type,
+        lambda_l1=args.lambda_l1,
+        aux_loss_weight=args.aux_loss_weight,
+        save_iteration_checkpoints=args.save_iteration_checkpoints,
+        checkpoint_dir=args.checkpoint_dir,
+        routing_strategy=args.routing_strategy,
+        confidence_threshold=args.confidence_threshold,
+        verbose=2,
+        # Wandb configuration
+        wandb_enabled=True,
+        wandb_project="nct-waterbirds",
+        wandb_entity="ankurgarg-university-of-calgary-in-alberta",
+        wandb_run_name=f"arc_job_{job_id}",
+        wandb_tags=["arc", "waterbirds", "resnet50"],
+        log_attributions=True,
+        log_epoch_metrics=True,
+        hierarchical_architecture=args.hierarchical_architecture
     )
 
     # Train the model - pass Dataset objects directly
@@ -206,6 +247,30 @@ def main():
         group_labels=data['group_test'],
         dataset_name="waterbird"
     )
+
+    # Save final checkpoint with iteration results for future attribution generation
+    final_checkpoint_path = os.path.join(args.checkpoint_dir, "final_model.pt")
+    classifier.save_checkpoint(final_checkpoint_path)
+    print(f"\nFinal checkpoint saved to: {final_checkpoint_path}")
+
+
+    # Generate attribution visualizations if requested
+    if args.generate_attributions:
+        print("\n--- Generating Attribution Visualizations ---")
+
+        # Create unique run directory using job_id and timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = f"{job_id}_{timestamp}"
+        run_attribution_dir = os.path.join(args.attribution_dir, run_id)
+
+        print(f"Saving attributions to: {run_attribution_dir}")
+
+        classifier.generate_attribution_visualizations(
+            X_test=data['test_dataset'],
+            save_dir=run_attribution_dir,
+            num_per_node=args.num_per_node,
+            num_transitions=args.num_transitions
+        )
 
     print("\n--- Experiment Complete ---")
 

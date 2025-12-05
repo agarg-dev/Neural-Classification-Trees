@@ -1,5 +1,6 @@
 """Model utilities and helper functions."""
 
+import copy
 import torch
 import torch.nn as nn
 from typing import Optional
@@ -13,6 +14,8 @@ def initialize_or_update_model(
     pretrained: bool = True,
     device: Optional[torch.device] = None,
     verbose: int = 0,
+    iteration: int = 1,
+    hierarchical: str = "none",
     **model_kwargs
 ) -> HierarchicalClassifier:
     """
@@ -23,6 +26,9 @@ def initialize_or_update_model(
         backbone: Backbone architecture name
         pretrained: Whether to use pretrained backbone weights
         device: Device to place the model on
+        verbose: Verbosity level
+        iteration: Current iteration number (1-indexed)
+        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
         **model_kwargs: Additional arguments for HierarchicalClassifier
     Returns:
         HierarchicalClassifier: New model with optionally transferred weights
@@ -30,35 +36,67 @@ def initialize_or_update_model(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Determine if this mode uses tree structure
+    # Both prediction_routing and correct_label_routing use tree structure
+    # Only "none" uses simple parallel heads
+    use_tree_structure = (hierarchical != "none")
+
+    # Build parent layers for hierarchical modes (prediction_routing and correct_label_routing)
+    parent_layers = None
+    if prev_model is not None and use_tree_structure and iteration > 1:
+        # Copy existing parent layers
+        parent_layers = [layer for layer in prev_model.parent_layers]
+
+        # Convert old output heads to parent heads (keep all layers for auxiliary loss)
+        new_parent_layer = nn.ModuleList()
+        for old_head in prev_model.output_heads:
+            # Keep all 4 layers: Linear, ReLU, Dropout, Linear (final for aux loss)
+            parent_head = nn.Sequential(
+                copy.deepcopy(old_head[0]),  # Linear(in_features, hidden_dim)
+                copy.deepcopy(old_head[1]),  # ReLU
+                copy.deepcopy(old_head[2]),  # Dropout
+                copy.deepcopy(old_head[3])   # Linear(hidden_dim, 1) - for aux loss
+            )
+            new_parent_layer.append(parent_head)
+        parent_layers.append(new_parent_layer)
+
     # Create new model
     new_model = HierarchicalClassifier(
         num_heads=num_nodes,
         backbone=backbone,
         pretrained=pretrained,
+        iteration=iteration,
+        parent_layers=parent_layers,
+        hierarchical=hierarchical,
         **model_kwargs
     ).to(device)
 
     if prev_model is not None:
-        # Transfer the learned backbone weights (silently unless verbose >= 2)
+        # Transfer the learned backbone weights
         try:
             new_model.base.load_state_dict(prev_model.base.state_dict())
+            if verbose >= 2:
+                print("Transferred backbone weights")
         except Exception as e:
             if verbose >= 1:
                 print(f"Backbone transfer failed: {e}")
 
-        # Transfer head weights to their new "easy" children
-        for old_head_idx, old_head in enumerate(prev_model.output_heads):
-            # Each old node splits into two new nodes (easy and difficult)
-            new_head_idx = old_head_idx * 2  # The "easy" child gets the old weights
+        # Non-hierarchical mode (none): Transfer head weights to both children
+        # Hierarchical modes (prediction_routing, correct_label_routing): Parent layers already transferred above
+        if not use_tree_structure:
+            for old_head_idx, old_head in enumerate(prev_model.output_heads):
+                easy_idx = old_head_idx * 2
+                hard_idx = old_head_idx * 2 + 1
 
-            if new_head_idx < len(new_model.output_heads):
-                try:
-                    new_model.output_heads[new_head_idx].load_state_dict(
-                        old_head.state_dict()
-                    )
-                except Exception as e:
-                    if verbose >= 1:
-                        print(f"Head {old_head_idx} → {new_head_idx} failed: {e}")
+                for new_head_idx in [easy_idx, hard_idx]:
+                    if new_head_idx < len(new_model.output_heads):
+                        try:
+                            new_model.output_heads[new_head_idx].load_state_dict(
+                                old_head.state_dict()
+                            )
+                        except Exception as e:
+                            if verbose >= 1:
+                                print(f"Head {old_head_idx} → {new_head_idx} failed: {e}")
 
     return new_model
 

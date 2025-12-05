@@ -5,10 +5,11 @@ This module defines the HierarchicalClassifier neural network that combines
 a shared backbone feature extractor with multiple classification heads.
 """
 
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 from torchvision import models
-from typing import Optional, Dict, Any
 
 
 class HierarchicalClassifier(nn.Module):
@@ -25,12 +26,15 @@ class HierarchicalClassifier(nn.Module):
     def __init__(
         self,
         num_heads: int,
-        backbone: str = 'resnet50',
+        backbone: str = "resnet50",
         pretrained: bool = True,
         freeze_base: bool = False,
         head_hidden_dim: int = 64,
         head_dropout: float = 0.5,
-        num_classes_per_head: int = 1
+        num_classes_per_head: int = 1,
+        iteration: int = 1,
+        parent_layers: Optional[list] = None,
+        hierarchical: str = "none",
     ):
         """
         Initialize the hierarchical classifier.
@@ -42,95 +46,150 @@ class HierarchicalClassifier(nn.Module):
             head_hidden_dim: Hidden dimension for output heads
             head_dropout: Dropout rate for output heads
             num_classes_per_head: Number of output classes per head
+            iteration: Current iteration number (1-indexed)
+            parent_layers: List of parent layers from previous iterations (for tree mode)
+            hierarchical: Hierarchical architecture mode ("none", "prediction_routing", "correct_label_routing")
         """
         super().__init__()
 
         self.num_heads = num_heads
         self.backbone_name = backbone
+        self.iteration = iteration
+        self.hierarchical = hierarchical
+        self.head_hidden_dim = head_hidden_dim
 
         # Initialize backbone
         self.base = self._create_backbone(backbone, pretrained)
         num_features = self._get_backbone_features(self.base)
+        self.num_features = num_features
 
-        # Remove original classifier
-        if hasattr(self.base, 'fc'):
-            self.base.fc = nn.Identity()
-        elif hasattr(self.base, 'classifier'):
-            self.base.classifier = nn.Identity()
-        elif hasattr(self.base, 'head'):
-            self.base.head = nn.Identity()
+        # Remove original classifier (ResNet always has .fc)
+        self.base.fc = nn.Identity()
 
         if freeze_base:
             for param in self.base.parameters():
                 param.requires_grad = False
 
-        # Create output heads
-        self.output_heads = nn.ModuleList([
-            self._create_head(
-                num_features,
-                head_hidden_dim,
-                head_dropout,
-                num_classes_per_head
-            )
-            for _ in range(num_heads)
-        ])
+        # Store parent layers (empty list for simple mode, ModuleList for hierarchical)
+        self.parent_layers = (
+            nn.ModuleList(parent_layers) if parent_layers else nn.ModuleList()
+        )
 
+        # Create output heads based on mode
+        if hierarchical != "none" and iteration > 1:
+            # Hierarchical tree structure (prediction_routing or correct_label_routing)
+            # Iteration 2+: heads connect to parent layer output
+            self.output_heads = nn.ModuleList(
+                [
+                    self._create_head(
+                        head_hidden_dim,
+                        head_hidden_dim,
+                        head_dropout,
+                        num_classes_per_head,
+                    )
+                    for _ in range(num_heads)
+                ]
+            )
+        else:
+            # Non-hierarchical mode (none) OR iteration 1: heads connect to backbone
+            self.output_heads = nn.ModuleList(
+                [
+                    self._create_head(
+                        num_features,
+                        head_hidden_dim,
+                        head_dropout,
+                        num_classes_per_head,
+                    )
+                    for _ in range(num_heads)
+                ]
+            )
 
     def _create_backbone(self, backbone: str, pretrained: bool) -> nn.Module:
         """Create backbone network."""
-        if backbone == 'resnet50':
-            weights = 'IMAGENET1K_V1' if pretrained else None
+        if backbone == "resnet50":
+            weights = "IMAGENET1K_V1" if pretrained else None
             return models.resnet50(weights=weights)
-        elif backbone == 'resnet18':
-            weights = 'IMAGENET1K_V1' if pretrained else None
+        elif backbone == "resnet18":
+            weights = "IMAGENET1K_V1" if pretrained else None
             return models.resnet18(weights=weights)
-        elif backbone == 'resnet34':
-            weights = 'IMAGENET1K_V1' if pretrained else None
+        elif backbone == "resnet34":
+            weights = "IMAGENET1K_V1" if pretrained else None
             return models.resnet34(weights=weights)
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
 
-    def _get_backbone_features(self, backbone: nn.Module) -> int:
-        """Get number of features from backbone."""
-        if hasattr(backbone, 'fc') and hasattr(backbone.fc, 'in_features'):
-            return backbone.fc.in_features
-        elif hasattr(backbone, 'classifier') and hasattr(backbone.classifier, 'in_features'):
-            return backbone.classifier.in_features
-        elif hasattr(backbone, 'head') and hasattr(backbone.head, 'in_features'):
-            return backbone.head.in_features
-        else:
-            # Try to infer from a forward pass
-            with torch.no_grad():
-                dummy_input = torch.randn(1, 3, 224, 224)
-                try:
-                    output = backbone(dummy_input)
-                    return output.shape[1]
-                except:
-                    raise ValueError("Could not determine backbone feature size")
+    def _get_backbone_features(self, backbone: nn.Module):
+        """Get number of features from ResNet backbone."""
+        return backbone.fc.in_features
 
-
-    def _create_head(self, in_features: int, hidden_dim: int, dropout: float, num_classes: int) -> nn.Module:
+    def _create_head(
+        self, in_features: int, hidden_dim: int, dropout: float, num_classes: int
+    ) -> nn.Module:
         """Create a single output head."""
         return nn.Sequential(
             nn.Linear(in_features, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Linear(hidden_dim, num_classes),
         )
 
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_aux_outputs: bool = False):
         """
         Forward pass through the network.
+
         Args:
             x: Input tensor of shape (batch_size, channels, height, width)
+            return_aux_outputs: If True, return (main_output, aux_outputs) for auxiliary loss
+
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, num_heads)
+            OR tuple (main_output, aux_outputs) if return_aux_outputs=True
         """
         features = self.base(x)
-        outputs = [head(features) for head in self.output_heads]
-        return torch.cat(outputs, dim=1)
+        aux_outputs = []  # Store auxiliary outputs from parent layers
 
+        if self.hierarchical != "none" and self.iteration > 1:
+            # Hierarchical tree structure: route through parent layers
+            # Used by both prediction_routing and correct_label_routing
+            current_features = [features] * len(self.parent_layers[0])
+
+            for parent_layer in self.parent_layers:
+                next_features = []
+                layer_aux_outputs = []
+
+                for parent_head in parent_layer:
+                    parent_input = current_features[len(next_features) // 2]
+
+                    # Compute features (layers 0-2) for children
+                    parent_features = parent_head[:3](parent_input)
+
+                    # Compute logits (layer 3) for auxiliary loss if requested
+                    # Backwards compatibility: check if 4th layer exists
+                    if return_aux_outputs and len(parent_head) > 3:
+                        parent_logits = parent_head[3](parent_features)
+                        layer_aux_outputs.append(parent_logits)
+
+                    next_features.append(parent_features)
+                    next_features.append(parent_features)
+
+                current_features = next_features
+
+                # Collect auxiliary outputs from this parent layer
+                if return_aux_outputs and len(layer_aux_outputs) > 0:
+                    aux_outputs.append(torch.cat(layer_aux_outputs, dim=1))
+
+            outputs = [
+                head(current_features[i]) for i, head in enumerate(self.output_heads)
+            ]
+        else:
+            # Non-hierarchical mode (none) OR iteration 1: direct connection
+            outputs = [head(features) for head in self.output_heads]
+
+        main_output = torch.cat(outputs, dim=1)
+
+        if return_aux_outputs:
+            return main_output, aux_outputs
+        return main_output
 
     def get_features(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -142,18 +201,15 @@ class HierarchicalClassifier(nn.Module):
         """
         return self.base(x)
 
-
     def freeze_base(self):
         """Freeze backbone parameters."""
         for param in self.base.parameters():
             param.requires_grad = False
 
-
     def unfreeze_base(self):
         """Unfreeze backbone parameters."""
         for param in self.base.parameters():
             param.requires_grad = True
-
 
     def get_trainable_parameters(self) -> Dict[str, list]:
         """
@@ -162,23 +218,34 @@ class HierarchicalClassifier(nn.Module):
             Dict[str, list]: Dictionary with 'base' and 'heads' parameter lists
         """
         base_params = [p for p in self.base.parameters() if p.requires_grad]
-        head_params = [p for p in self.output_heads.parameters() if p.requires_grad]
 
-        return {
-            'base': base_params,
-            'heads': head_params
-        }
+        # Include parent layers with heads in hierarchical modes
+        head_params = list(self.output_heads.parameters())
+        if self.hierarchical != "none" and len(self.parent_layers) > 0:
+            # Both prediction_routing and correct_label_routing use parent layers
+            for parent_layer in self.parent_layers:
+                head_params.extend(parent_layer.parameters())
+        head_params = [p for p in head_params if p.requires_grad]
 
+        return {"base": base_params, "heads": head_params}
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information."""
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-        return {
-            'backbone': self.backbone_name,
-            'num_heads': self.num_heads,
-            'total_parameters': total_params,
-            'trainable_parameters': trainable_params,
-            'base_frozen': not any(p.requires_grad for p in self.base.parameters())
+        info = {
+            "backbone": self.backbone_name,
+            "num_heads": self.num_heads,
+            "hierarchical_mode": self.hierarchical,
+            "total_parameters": total_params,
+            "trainable_parameters": trainable_params,
+            "base_frozen": not any(p.requires_grad for p in self.base.parameters()),
         }
+
+        if self.hierarchical != "none":
+            # Both prediction_routing and correct_label_routing use tree structure
+            info["iteration"] = self.iteration
+            info["num_parent_layers"] = len(self.parent_layers)
+
+        return info

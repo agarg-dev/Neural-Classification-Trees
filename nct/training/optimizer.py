@@ -15,7 +15,8 @@ except ImportError:
 def create_optimizer(
     parameters: Union[List[Dict], List[Any]],
     config: OptimizerConfig,
-    learning_rate: float = 1e-3
+    learning_rate: float = 1e-3,
+    regularization_type: str = 'l2'
 ) -> optim.Optimizer:
     """
     Create an optimizer with specified parameters.
@@ -24,17 +25,25 @@ def create_optimizer(
         parameters: Model parameters or parameter groups
         config: OptimizerConfig object with all hyperparameters
         learning_rate: Learning rate (overrides config if provided)
+        regularization_type: Type of regularization ('l1', 'l2', 'elastic_net', 'none')
 
     Returns:
         torch.optim.Optimizer: Configured optimizer
     """
     optimizer_type = config.type.lower()
 
+    # Determine weight_decay based on regularization type
+    # L2 and elastic_net use optimizer's weight_decay, L1 and none don't
+    if regularization_type in ['l2', 'elastic_net']:
+        weight_decay = config.weight_decay
+    else:  # 'l1' or 'none'
+        weight_decay = 0.0
+
     if optimizer_type == 'adamw':
         return optim.AdamW(
             parameters,
             lr=learning_rate,
-            weight_decay=config.weight_decay,
+            weight_decay=weight_decay,
             betas=config.betas,
             eps=config.eps
         )
@@ -42,7 +51,7 @@ def create_optimizer(
         return optim.Adam(
             parameters,
             lr=learning_rate,
-            weight_decay=config.weight_decay,
+            weight_decay=weight_decay,
             betas=config.betas,
             eps=config.eps
         )
@@ -50,7 +59,7 @@ def create_optimizer(
         return optim.SGD(
             parameters,
             lr=learning_rate,
-            weight_decay=config.weight_decay,
+            weight_decay=weight_decay,
             momentum=config.momentum,
             nesterov=config.nesterov
         )
@@ -58,7 +67,7 @@ def create_optimizer(
         return optim.RMSprop(
             parameters,
             lr=learning_rate,
-            weight_decay=config.weight_decay
+            weight_decay=weight_decay
         )
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
@@ -68,7 +77,8 @@ def create_two_stage_optimizer(
     model_parameters: Dict[str, List],
     base_lr: float,
     head_lr: float,
-    config: OptimizerConfig
+    config: OptimizerConfig,
+    regularization_type: str = 'l2'
 ) -> optim.Optimizer:
     """
     Create optimizer with different learning rates for backbone and heads.
@@ -78,6 +88,7 @@ def create_two_stage_optimizer(
         base_lr: Learning rate for backbone
         head_lr: Learning rate for heads
         config: OptimizerConfig object with all hyperparameters
+        regularization_type: Type of regularization ('l1', 'l2', 'elastic_net', 'none')
 
     Returns:
         torch.optim.Optimizer: Configured optimizer with parameter groups
@@ -89,7 +100,8 @@ def create_two_stage_optimizer(
     return create_optimizer(
         param_groups,
         config=config,
-        learning_rate=head_lr  # Default LR (will be overridden by param groups)
+        learning_rate=head_lr,  # Default LR (will be overridden by param groups)
+        regularization_type=regularization_type
     )
 
 
