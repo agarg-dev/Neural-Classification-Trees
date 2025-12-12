@@ -30,7 +30,12 @@ def calculate_basic_metrics(
     """
 
     # Auto-detect if multiclass and adjust averaging
-    num_classes = len(np.unique(y_true))
+    # Check both y_true and y_pred to handle edge cases where model
+    # predicts only a subset of classes or predicts extra classes
+    num_classes_true = len(np.unique(y_true))
+    num_classes_pred = len(np.unique(y_pred))
+    num_classes = max(num_classes_true, num_classes_pred)
+
     if num_classes > 2 and average == "binary":
         average = "weighted"
 
@@ -256,6 +261,7 @@ def compute_iteration_transitions(
 def compute_pseudo_label_metrics(
     true_pseudo_labels: np.ndarray,
     predicted_pseudo_labels: np.ndarray,
+    num_expected_classes: int,
 ) -> Dict[str, Any]:
     """
     Compute pseudo label metrics (multi-class routing accuracy).
@@ -265,9 +271,11 @@ def compute_pseudo_label_metrics(
     Args:
         true_pseudo_labels: Ground truth pseudo labels from previous iteration
         predicted_pseudo_labels: Predicted routing from current iteration
+        num_expected_classes: Expected number of classes (should be 2^iteration)
 
     Returns:
-        Dict with accuracy, F1, and worst pseudo-group accuracy
+        Dict with accuracy, F1, worst pseudo-group accuracy (all classes),
+        and worst pseudo-group accuracy (filled classes only)
     """
     from sklearn.metrics import accuracy_score, f1_score
 
@@ -277,21 +285,32 @@ def compute_pseudo_label_metrics(
     # Multi-class F1 (macro average)
     f1 = f1_score(true_pseudo_labels, predicted_pseudo_labels, average='macro')
 
-    # Per-class accuracy (for worst group)
-    group_accs = {}
-    for gid in np.unique(true_pseudo_labels):
+    # Per-class accuracy for ALL expected classes
+    group_accs_all = {}
+    group_accs_filled = {}
+
+    for gid in range(num_expected_classes):
         mask = (true_pseudo_labels == gid)
         if np.sum(mask) > 0:
-            group_accs[int(gid)] = float(accuracy_score(
+            # Class exists in training data
+            acc = float(accuracy_score(
                 true_pseudo_labels[mask],
                 predicted_pseudo_labels[mask]
             ))
+            group_accs_all[int(gid)] = acc
+            group_accs_filled[int(gid)] = acc
+        else:
+            # Class missing from training data = 0% accuracy
+            group_accs_all[int(gid)] = 0.0
 
     return {
         "accuracy": float(accuracy),
         "f1_score": float(f1),
-        "worst_group_accuracy": float(min(group_accs.values())) if group_accs else 0.0,
-        "group_accuracies": group_accs,
+        "worst_group_accuracy": float(min(group_accs_all.values())) if group_accs_all else 0.0,
+        "worst_group_accuracy_filled": float(min(group_accs_filled.values())) if group_accs_filled else 0.0,
+        "group_accuracies": group_accs_all,
+        "num_filled_classes": len(group_accs_filled),
+        "num_expected_classes": num_expected_classes,
     }
 
 

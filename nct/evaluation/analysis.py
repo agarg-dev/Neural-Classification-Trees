@@ -116,8 +116,8 @@ def analyze_hierarchical_nodes(
     num_iterations: int = 1,
     group_names: Optional[Dict[int, str]] = None,
     verbose: int = 1,
-    is_waterbird: bool = False,
-    hierarchical: str = "none"
+    hierarchical: str = "none",
+    class_names: Optional[Tuple[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Analyze the performance of each node in the hierarchical classifier.
@@ -128,8 +128,8 @@ def analyze_hierarchical_nodes(
         num_iterations: Number of iterations in the hierarchy
         group_names: Optional mapping from group IDs to names
         verbose: Verbosity level (0=silent, 1=basic, 2=detailed)
-        is_waterbird: Whether this is Waterbird dataset specific
         hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
+        class_names: Optional binary class names
     Returns:
         Dict[str, Any]: Analysis results
     """
@@ -152,7 +152,7 @@ def analyze_hierarchical_nodes(
     for node_idx in range(final_num_nodes):
         node_info = _analyze_single_node(
             node_idx, predicted_hier_classes, true_binary_labels, group_labels,
-            num_iterations, group_names, is_waterbird, verbose, hierarchical
+            num_iterations, group_names, verbose, hierarchical, class_names
         )
         node_analysis[f'node_{node_idx}'] = node_info
 
@@ -182,7 +182,7 @@ def analyze_hierarchical_nodes(
 def _analyze_single_node(
     node_idx: int, predicted_hier_classes: np.ndarray, true_binary_labels: np.ndarray,
     group_labels: Optional[np.ndarray], num_iterations: int, group_names: Optional[Dict[int, str]],
-    is_waterbird: bool, verbose: int, hierarchical: str = "none"
+    verbose: int, hierarchical: str = "none", class_names: Optional[Tuple[str, str]] = None
 ) -> Dict[str, Any]:
     """Analyze a single node - simple helper to reduce the monster function."""
     mask = (predicted_hier_classes == node_idx)
@@ -190,7 +190,6 @@ def _analyze_single_node(
     final_num_nodes = 2 ** num_iterations
 
     # Basic node info
-    class_names = ["Land Bird", "Water Bird"] if is_waterbird else None
     path_str = get_node_label(node_idx, num_iterations, class_names, hierarchical)
     if hierarchical == "prediction_routing":
         node_predicts_binary = get_node_class(node_idx, num_iterations)
@@ -198,9 +197,11 @@ def _analyze_single_node(
         node_predicts_binary = get_node_class_correct_label(node_idx, num_iterations)
     else:  # "none"
         node_predicts_binary = 1 if node_idx >= final_num_nodes / 2 else 0
-    prediction_str = "Water Bird" if (is_waterbird and node_predicts_binary == 1) else \
-                    "Land Bird" if (is_waterbird and node_predicts_binary == 0) else \
-                    f"Class {node_predicts_binary}"
+
+    if class_names and node_predicts_binary < len(class_names):
+        prediction_str = class_names[node_predicts_binary]
+    else:
+        prediction_str = f"Class {node_predicts_binary}"
 
     node_info = {
         'node_index': node_idx,

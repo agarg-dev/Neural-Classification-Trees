@@ -6,7 +6,7 @@ Main interface for hierarchical image classification using iterative training.
 
 import os
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -16,14 +16,14 @@ from torch.utils.data import Dataset as TorchDataset
 
 from ..data.datasets import IterativeDataset, extract_labels_from_dataset
 from ..data.loaders import create_data_loader
-from ..evaluation.analysis import analyze_hierarchical_nodes, get_waterbird_group_names
+from ..evaluation.analysis import analyze_hierarchical_nodes
 from ..evaluation.metrics import (
     calculate_basic_metrics,
     calculate_group_metrics,
     calculate_hierarchical_metrics,
     compute_iteration_transitions,
+    compute_pseudo_label_metrics,
     print_evaluation_report,
-    compute_pseudo_label_metrics
 )
 from ..models.utils import initialize_or_update_model
 from ..training.loss import compute_class_weights
@@ -32,21 +32,23 @@ from ..utils.checkpoints import CheckpointManager
 from ..utils.device import get_device
 from ..utils.hierarchical import (
     get_node_class,
-    node_to_class,
     get_node_class_correct_label,
+    node_to_class,
     node_to_class_correct_label,
 )
-from ..visualization.attribution_captum import ALL_METHODS, LAYER_METHODS, PIXEL_METHODS
-
 from ..utils.logger import NCTLogger
 from ..utils.seed import set_seed
+from ..visualization.attribution_captum import ALL_METHODS, LAYER_METHODS, PIXEL_METHODS
+
 try:
     from ..visualization.attribution_captum import CaptumAttribution
+
     CAPTUM_AVAILABLE = True
 except ImportError:
     CAPTUM_AVAILABLE = False
     CaptumAttribution = None
 from .config import NCTConfig
+
 
 class NCTClassifier:
     """
@@ -62,44 +64,19 @@ class NCTClassifier:
         generator: RNG for reproducible shuffling.
     """
 
-    def __init__(
-        self,
-        num_iterations: int = 3,
-        epochs_per_iteration: Optional[List[int]] = None,
-        batch_size: int = 32,
-        initial_base_lr: float = 1e-5,
-        initial_head_lr: float = 1e-5,
-        lr_decay_factor: float = 2.0,
-        backbone: str = "resnet50",
-        **kwargs,
-    ):
+    def __init__(self, config: NCTConfig = None, **kwargs):
         """
         Initialize the NCT classifier.
 
         Args:
-            num_iterations: Number of hierarchical levels.
-            epochs_per_iteration: List of epoch counts for each iteration.
-            batch_size: Training and inference batch size.
-            initial_base_lr: Initial learning rate for backbone.
-            initial_head_lr: Initial learning rate for classification heads.
-            lr_decay_factor: LR decay factor per iteration.
-            backbone: Backbone architecture ('resnet50', 'resnet18', etc.).
-            **kwargs: Additional config (optimizer_type, scheduler_type, use_class_weights,
-                      pretrained, phase1_epochs_ratio, patience, early_stopping, image_size,
-                      num_workers, pin_memory, seed, device, verbose).
-                      See NCTConfig for full details and defaults.
+            config: NCTConfig object. If None, builds from **kwargs.
+            **kwargs: Used to build NCTConfig if config is None (backwards compatible).
         """
 
-        self.config = NCTConfig(
-            num_iterations=num_iterations,
-            epochs_per_iteration=epochs_per_iteration,
-            batch_size=batch_size,
-            initial_base_lr=initial_base_lr,
-            initial_head_lr=initial_head_lr,
-            lr_decay_factor=lr_decay_factor,
-            backbone=backbone,
-            **kwargs,
-        )
+        if config is not None:
+            self.config = config
+        else:
+            self.config = NCTConfig(**kwargs)
 
         self.device = get_device(self.config.device)
         if self.config.seed is not None:
@@ -129,6 +106,8 @@ class NCTClassifier:
         X_test: Optional[Any] = None,
         group_labels: Optional[Any] = None,
         dataset_name: str = "generic",
+        class_names: Optional[Tuple[str, str]] = None,
+        group_names: Optional[Dict[int, str]] = None,
     ) -> Dict[str, Any]:
         """
         Train the hierarchical classifier on the provided data.
@@ -138,6 +117,8 @@ class NCTClassifier:
             X_test: Optional test data for per-iteration evaluation.
             group_labels: Optional group labels for test data evaluation.
             dataset_name: Name of dataset for evaluation (e.g., "waterbird").
+            class_names: Optional binary class names (e.g., ("Landbird", "Waterbird")).
+            group_names: Optional group ID to name mapping for display.
         Returns:
             Dictionary with training results including:
                 - 'val_pseudo_metrics': Validation pseudo-label metrics from final iteration (if available)
@@ -148,6 +129,10 @@ class NCTClassifier:
             raise NotImplementedError(
                 "Direct tensor/array inputs not supported. Please pass PyTorch Dataset objects."
             )
+
+        # Store class and group names for later use
+        self._class_names = class_names
+        self._group_names = group_names
 
         y_train = extract_labels_from_dataset(X_train)
         y_val = extract_labels_from_dataset(X_val)
@@ -191,12 +176,13 @@ class NCTClassifier:
         if self.config.hierarchical_architecture == "prediction_routing":
             binary_preds = node_to_class(hierarchical_preds, self.config.num_iterations)
         elif self.config.hierarchical_architecture == "correct_label_routing":
-            binary_preds = node_to_class_correct_label(hierarchical_preds, self.config.num_iterations)
+            binary_preds = node_to_class_correct_label(
+                hierarchical_preds, self.config.num_iterations
+            )
         else:  # "none"
             final_num_nodes = 2**self.config.num_iterations
             binary_preds = (hierarchical_preds >= final_num_nodes / 2).long()
         return binary_preds.numpy()
-
 
     def predict_proba(self, X: Any) -> np.ndarray:
         """
@@ -228,7 +214,10 @@ class NCTClassifier:
             class_0_nodes = []
             class_1_nodes = []
             for node_id in range(final_num_nodes):
-                if get_node_class_correct_label(node_id, self.config.num_iterations) == 0:
+                if (
+                    get_node_class_correct_label(node_id, self.config.num_iterations)
+                    == 0
+                ):
                     class_0_nodes.append(node_id)
                 else:
                     class_1_nodes.append(node_id)
@@ -278,6 +267,7 @@ class NCTClassifier:
         group_labels: Optional[List[int]] = None,
         group_names: Optional[Dict[int, str]] = None,
         dataset_name: str = "generic",
+        class_names: Optional[Tuple[str, str]] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate model performance on test data.
@@ -285,7 +275,8 @@ class NCTClassifier:
             X_test: Test data. Must be a PyTorch Dataset object.
             group_labels: Optional group/subpopulation labels for fairness analysis.
             group_names: Optional mapping from group IDs to readable names.
-            dataset_name: Name of the dataset (used for special handling).
+            dataset_name: Name of the dataset.
+            class_names: Optional binary class names.
         Returns:
             Dictionary containing evaluation metrics:
                 - basic_metrics: Accuracy, precision, recall, F1.
@@ -297,9 +288,12 @@ class NCTClassifier:
         if not self._is_fitted:
             raise ValueError("Model must be fitted first")
 
-        is_waterbird = dataset_name.lower() == "waterbird"
-        if is_waterbird and group_names is None:
-            group_names = get_waterbird_group_names()
+        # Use stored values if not provided
+        if class_names is None and hasattr(self, "_class_names"):
+            class_names = self._class_names
+        if group_names is None and hasattr(self, "_group_names"):
+            group_names = self._group_names
+
         binary_predictions = self.predict(X_test)
         test_loader = self._create_iterative_loader(X_test, is_training=False)
         hierarchical_predictions = self._get_hierarchical_predictions(test_loader)
@@ -320,7 +314,9 @@ class NCTClassifier:
         # Calculate group metrics if group labels provided
         if group_labels is not None:
             group_labels_np = np.array(group_labels)
-            group_metrics = calculate_group_metrics(y_test_np, binary_predictions, group_labels_np, group_names)
+            group_metrics = calculate_group_metrics(
+                y_test_np, binary_predictions, group_labels_np, group_names
+            )
             results["group_metrics"] = group_metrics
 
             # Analyze hierarchical nodes
@@ -331,8 +327,8 @@ class NCTClassifier:
                 self.config.num_iterations,
                 group_names,
                 verbose=self.config.verbose,
-                is_waterbird=is_waterbird,
                 hierarchical=self.config.hierarchical_architecture,
+                class_names=class_names,
             )
             results["node_analysis"] = node_analysis
 
@@ -347,7 +343,8 @@ class NCTClassifier:
         save_dir: str = "./attributions",
         num_per_node: int = 5,
         num_transitions: int = 5,
-        methods: Union[str, List[str]] = "layer_gradcam"
+        methods: Union[str, List[str]] = "layer_gradcam",
+        class_names: Optional[Tuple[str, str]] = None,
     ) -> None:
         """
         Generate attribution visualizations for hierarchical nodes using Captum.
@@ -375,7 +372,9 @@ class NCTClassifier:
             # Iteration results should be available if loaded from final checkpoint.
             # They're only missing if loaded from iteration checkpoint or old format.
             if self.model is None:
-                 raise ValueError("No iteration results found. Pass X_test to fit() to enable attributions")
+                raise ValueError(
+                    "No iteration results found. Pass X_test to fit() to enable attributions"
+                )
 
         if self.model is None:
             raise ValueError("Model is not available for attribution generation")
@@ -393,7 +392,13 @@ class NCTClassifier:
             checkpoint_loader=lambda path: CheckpointManager.load_model_from_checkpoint(
                 path, self.config, self.device
             ),
-            class_names=["Landbird", "Waterbird"],
+            class_names=class_names
+            if class_names
+            else (
+                self._class_names
+                if hasattr(self, "_class_names")
+                else ["Class 0", "Class 1"]
+            ),
             num_iterations=self.config.num_iterations,
             hierarchical=self.config.hierarchical_architecture,
             attribution_method="layer_gradcam",  # Default, overridden by methods parameter
@@ -411,7 +416,6 @@ class NCTClassifier:
 
         # Log attribution images if enabled
         if self.config.log_attributions:
-
             # Determine which methods were actually run
             if isinstance(methods, list):
                 methods_to_log = methods
@@ -438,13 +442,18 @@ class NCTClassifier:
                         method_save_dir, f"iteration_{iteration_num}_nodes.png"
                     )
                     if os.path.exists(node_viz_path):
-                        caption = f"Iter {iteration_num} - {method_name} - Node Attributions"
-                        self.logger.log_attribution_image(node_viz_path, caption, iteration_num)
+                        caption = (
+                            f"Iter {iteration_num} - {method_name} - Node Attributions"
+                        )
+                        self.logger.log_attribution_image(
+                            node_viz_path, caption, iteration_num
+                        )
 
                 # Log transition visualizations
                 for i in range(len(self._iteration_results) - 1):
                     forgetting_path = os.path.join(
-                        method_save_dir, f"transitions_{i + 1}_to_{i + 2}_forgetting.png"
+                        method_save_dir,
+                        f"transitions_{i + 1}_to_{i + 2}_forgetting.png",
                     )
                     learning_path = os.path.join(
                         method_save_dir, f"transitions_{i + 1}_to_{i + 2}_learning.png"
@@ -460,7 +469,7 @@ class NCTClassifier:
 
             # Finish WandB run after all attributions are logged
             self.logger.finish_wandb()
-            
+
     # ============================================================================
     # CHECKPOINT MANAGEMENT
     # ============================================================================
@@ -566,7 +575,6 @@ class NCTClassifier:
                 head_hidden_dim=self.config.head_hidden_dim,
                 head_dropout=self.config.head_dropout,
             )
-
 
             train_iter_dataset = IterativeDataset(
                 base_train_dataset, current_train_labels
@@ -691,10 +699,15 @@ class NCTClassifier:
         )
 
         # Log routing statistics for confidence-based routing
-        if self.config.hierarchical_architecture == "none" and self.config.routing_strategy == "confidence":
+        if (
+            self.config.hierarchical_architecture == "none"
+            and self.config.routing_strategy == "confidence"
+        ):
             routing_stats = {
                 "num_wrong": (~is_correct_train).sum().item(),
-                "num_low_confidence": (is_correct_train & is_difficult_train).sum().item(),
+                "num_low_confidence": (is_correct_train & is_difficult_train)
+                .sum()
+                .item(),
                 "num_difficult": is_difficult_train.sum().item(),
                 "total": len(train_labels),
             }
@@ -762,7 +775,6 @@ class NCTClassifier:
         else:  # "none"
             # Simple mode: route by label (same as correct_label_routing for routing)
             return labels * 2 + is_difficult.long()
-        
 
     def _determine_difficult_samples(
         self,
@@ -789,7 +801,10 @@ class NCTClassifier:
             Boolean tensor indicating difficult samples
         """
         # Hierarchical modes: always use correctness-based routing
-        if self.config.hierarchical_architecture in ["prediction_routing", "correct_label_routing"]:
+        if self.config.hierarchical_architecture in [
+            "prediction_routing",
+            "correct_label_routing",
+        ]:
             return ~is_correct
 
         # Simple mode ("none") with confidence-based routing
@@ -830,7 +845,6 @@ class NCTClassifier:
 
         return is_difficult
 
-
     # ============================================================================
     # INFERENCE - Model Predictions
     # ============================================================================
@@ -860,7 +874,6 @@ class NCTClassifier:
                 all_predictions.append(predictions.cpu())
 
         return torch.cat(all_predictions)
-
 
     def _get_hierarchical_probabilities(
         self, dataloader: DataLoader, model: Optional[nn.Module] = None
@@ -921,17 +934,23 @@ class NCTClassifier:
 
         # Get test predictions
         test_loader = self._create_iterative_loader(X_test, is_training=False)
-        hierarchical_predictions = self._get_hierarchical_predictions(test_loader, model=model)
+        hierarchical_predictions = self._get_hierarchical_predictions(
+            test_loader, model=model
+        )
         y_test = extract_labels_from_dataset(X_test)
 
         # Convert hierarchical to binary predictions
         if self.config.hierarchical_architecture == "prediction_routing":
             binary_predictions = node_to_class(hierarchical_predictions, iteration)
         elif self.config.hierarchical_architecture == "correct_label_routing":
-            binary_predictions = node_to_class_correct_label(hierarchical_predictions, iteration)
+            binary_predictions = node_to_class_correct_label(
+                hierarchical_predictions, iteration
+            )
         else:  # "none"
             final_num_nodes = 2**iteration
-            binary_predictions = (hierarchical_predictions >= final_num_nodes / 2).long()
+            binary_predictions = (
+                hierarchical_predictions >= final_num_nodes / 2
+            ).long()
 
         # Convert to numpy
         y_test_np = y_test.cpu().numpy()
@@ -939,20 +958,29 @@ class NCTClassifier:
         hierarchical_predictions_np = hierarchical_predictions.cpu().numpy()
         group_labels_np = np.array(group_labels) if group_labels is not None else None
 
-        # Detect dataset type
-        is_waterbird = dataset_name.lower() == "waterbird"
-        group_names = get_waterbird_group_names() if is_waterbird else None
+        # Use stored values from fit()
+        group_names = self._group_names if hasattr(self, "_group_names") else None
 
-        self.logger.log(f"\n--- Evaluation on Test Set after Iteration {iteration} ---", level=1)
+        self.logger.log(
+            f"\n--- Evaluation on Test Set after Iteration {iteration} ---", level=1
+        )
 
         # Track transitions between iterations
         if iteration > 1 and len(self._iteration_results) > 0:
             prev_result = self._iteration_results[-1]
             transitions = compute_iteration_transitions(
-                prev_result["predictions"], binary_predictions_np, y_test_np, group_labels_np
+                prev_result["predictions"],
+                binary_predictions_np,
+                y_test_np,
+                group_labels_np,
             )
             self.logger.log_transitions(
-                iteration, iteration - 1, transitions, group_labels, dataset_name
+                iteration,
+                iteration - 1,
+                transitions,
+                group_labels,
+                dataset_name,
+                group_names,
             )
 
         # Generate pseudo labels for next iteration
@@ -966,7 +994,7 @@ class NCTClassifier:
             else:
                 current_test_labels = y_test
 
-            is_correct = (hierarchical_predictions == current_test_labels)
+            is_correct = hierarchical_predictions == current_test_labels
             is_difficult = self._determine_difficult_samples(
                 model, X_test, current_test_labels, is_correct
             )
@@ -975,19 +1003,29 @@ class NCTClassifier:
             )
 
         # Store test results
-        self._iteration_results.append({
-            "predictions": binary_predictions_np,
-            "hierarchical_predictions": hierarchical_predictions_np,
-            "test_pseudo_labels": test_pseudo_labels.cpu().numpy() if test_pseudo_labels is not None else None,
-            "checkpoint_path": checkpoint_path,
-        })
+        self._iteration_results.append(
+            {
+                "predictions": binary_predictions_np,
+                "hierarchical_predictions": hierarchical_predictions_np,
+                "test_pseudo_labels": test_pseudo_labels.cpu().numpy()
+                if test_pseudo_labels is not None
+                else None,
+                "checkpoint_path": checkpoint_path,
+            }
+        )
 
         # Compute routing quality metrics (test)
         pseudo_metrics = None
-        if iteration > 1 and self._iteration_results[-2]["test_pseudo_labels"] is not None:
+        if (
+            iteration > 1
+            and self._iteration_results[-2]["test_pseudo_labels"] is not None
+        ):
             prev_pseudo_labels = self._iteration_results[-2]["test_pseudo_labels"]
             curr_routing = self._iteration_results[-1]["hierarchical_predictions"]
-            pseudo_metrics = compute_pseudo_label_metrics(prev_pseudo_labels, curr_routing)
+            num_expected_classes = 2 ** iteration
+            pseudo_metrics = compute_pseudo_label_metrics(
+                prev_pseudo_labels, curr_routing, num_expected_classes
+            )
 
         # Compute test metrics
         basic_metrics = calculate_basic_metrics(y_test_np, binary_predictions_np)
@@ -1000,28 +1038,45 @@ class NCTClassifier:
             hierarchical_predictions_np, iteration, y_test_np, binary_predictions_np
         )
 
-        # Detailed analysis for waterbird dataset
-        if is_waterbird and group_labels_np is not None and self.config.verbose >= 2:
+        # Detailed analysis
+        if group_labels_np is not None and self.config.verbose >= 2:
             analyze_hierarchical_nodes(
-                hierarchical_predictions, y_test, torch.from_numpy(group_labels_np),
-                iteration, group_names, verbose=True, is_waterbird=True,
-                hierarchical=self.config.hierarchical_architecture
+                hierarchical_predictions,
+                y_test,
+                torch.from_numpy(group_labels_np),
+                iteration,
+                group_names,
+                verbose=True,
+                hierarchical=self.config.hierarchical_architecture,
+                class_names=self._class_names
+                if hasattr(self, "_class_names")
+                else None,
             )
 
         # Log results
         self.logger.log_evaluation_results(basic_metrics, pseudo_metrics, group_results)
 
         # Prepare summary
-        training_time = time.time() - self.logger.iteration_start_time if self.logger.iteration_start_time else 0.0
+        training_time = (
+            time.time() - self.logger.iteration_start_time
+            if self.logger.iteration_start_time
+            else 0.0
+        )
         if pseudo_metrics:
-            basic_metrics['pseudo_label_accuracy'] = pseudo_metrics['accuracy']
-            basic_metrics['pseudo_label_f1'] = pseudo_metrics['f1_score']
-            basic_metrics['pseudo_worst_group_acc'] = pseudo_metrics['worst_group_accuracy']
+            basic_metrics["pseudo_label_accuracy"] = pseudo_metrics["accuracy"]
+            basic_metrics["pseudo_label_f1"] = pseudo_metrics["f1_score"]
+            basic_metrics["pseudo_worst_group_acc"] = pseudo_metrics[
+                "worst_group_accuracy"
+            ]
 
         self.logger.log_iteration_summary(
-            iteration=iteration, test_metrics=basic_metrics, group_metrics=group_results,
-            node_metrics=node_metrics, training_time=training_time,
-            num_epochs_trained=num_epochs_trained, early_stopped=early_stopped
+            iteration=iteration,
+            test_metrics=basic_metrics,
+            group_metrics=group_results,
+            node_metrics=node_metrics,
+            training_time=training_time,
+            num_epochs_trained=num_epochs_trained,
+            early_stopped=early_stopped,
         )
 
     def _evaluate_validation_at_iteration(
@@ -1040,12 +1095,14 @@ class NCTClassifier:
         """
         # Ensure results entry exists (may not if no test set)
         if len(self._iteration_results) < iteration:
-            self._iteration_results.append({
-                "predictions": None,
-                "hierarchical_predictions": None,
-                "test_pseudo_labels": None,
-                "checkpoint_path": None,
-            })
+            self._iteration_results.append(
+                {
+                    "predictions": None,
+                    "hierarchical_predictions": None,
+                    "test_pseudo_labels": None,
+                    "checkpoint_path": None,
+                }
+            )
 
         # Store validation pseudo labels
         self._iteration_results[-1]["val_pseudo_labels"] = (
@@ -1054,16 +1111,15 @@ class NCTClassifier:
 
         # Compute validation pseudo-label metrics
         if iteration > 1 and len(self._iteration_results) >= 2:
-            prev_val_pseudo_labels = self._iteration_results[-2].get("val_pseudo_labels")
+            prev_val_pseudo_labels = self._iteration_results[-2].get(
+                "val_pseudo_labels"
+            )
             if prev_val_pseudo_labels is not None:
+                num_expected_classes = 2 ** iteration
                 val_pseudo_metrics = compute_pseudo_label_metrics(
-                    prev_val_pseudo_labels,
-                    val_hierarchical_preds.cpu().numpy()
+                    prev_val_pseudo_labels, val_hierarchical_preds.cpu().numpy(), num_expected_classes
                 )
                 self._iteration_results[-1]["val_pseudo_metrics"] = val_pseudo_metrics
-
-
-
 
     def _compute_weight_changes(self, model: nn.Module) -> Dict[str, float]:
         """
@@ -1108,8 +1164,15 @@ class NCTClassifier:
 
         stats = {}
         if backbone_changes:
-            stats["backbone_mean_abs_change"] = np.mean([x[0] for x in backbone_changes])
-            stats["backbone_relative_change"] = np.mean([x[1] for x in backbone_changes])
+            stats["backbone_mean_abs_change"] = np.mean(
+                [x[0] for x in backbone_changes]
+            )
+            stats["backbone_relative_change"] = np.mean(
+                [x[1] for x in backbone_changes]
+            )
+            stats["backbone_relative_change"] = np.mean(
+                [x[1] for x in backbone_changes]
+            )
         if head_changes:
             stats["heads_mean_abs_change"] = np.mean([x[0] for x in head_changes])
             stats["heads_relative_change"] = np.mean([x[1] for x in head_changes])

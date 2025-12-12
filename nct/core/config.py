@@ -1,9 +1,11 @@
 """Configuration classes for NCT."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import torch
+import yaml
 
 VALID_OPTIMIZERS = ["adamw", "adam", "sgd", "rmsprop"]
 VALID_SCHEDULERS = ["plateau", "step", "cosine", "cosine_warmup", "none"]
@@ -123,13 +125,16 @@ class NCTConfig:
     early_stopping: bool = True
     save_iteration_checkpoints: bool = True
     checkpoint_dir: str = "./checkpoints"
+    attribution_dir: str = "./attributions"
 
     # Routing strategy
     routing_strategy: str = "argmax"  # 'argmax' or 'confidence'
     confidence_threshold: float = 0.7
 
     # Hierarchical architecture mode
-    hierarchical_architecture: str = "none"  # 'none', 'prediction_routing', 'correct_label_routing'
+    hierarchical_architecture: str = (
+        "none"  # 'none', 'prediction_routing', 'correct_label_routing'
+    )
 
     # Data parameters
     image_size: int = 224
@@ -189,7 +194,11 @@ class NCTConfig:
                 f"routing_strategy must be one of {valid_routing_strategies}, got '{self.routing_strategy}'"
             )
 
-        valid_hierarchical_modes = ["none", "prediction_routing", "correct_label_routing"]
+        valid_hierarchical_modes = [
+            "none",
+            "prediction_routing",
+            "correct_label_routing",
+        ]
         if self.hierarchical_architecture not in valid_hierarchical_modes:
             raise ValueError(
                 f"hierarchical_architecture must be one of {valid_hierarchical_modes}, got '{self.hierarchical_architecture}'"
@@ -198,6 +207,28 @@ class NCTConfig:
     @classmethod
     def from_dict(cls, config_dict: dict) -> "NCTConfig":
         """Create configuration from dictionary."""
+        return cls(**config_dict)
+
+    @classmethod
+    def from_yaml(cls, yaml_path: str, **overrides) -> "NCTConfig":
+        """Load configuration from YAML file with optional overrides."""
+
+        yaml_file = Path(yaml_path)
+        if not yaml_file.exists():
+            raise FileNotFoundError(f"Configuration file not found: {yaml_path}")
+
+        with open(yaml_file, "r") as f:
+            config_dict = yaml.safe_load(f) or {}
+
+        # Handle nested configs
+        if "optimizer" in config_dict and isinstance(config_dict["optimizer"], dict):
+            config_dict["optimizer"] = OptimizerConfig(**config_dict["optimizer"])
+        if "scheduler" in config_dict and isinstance(config_dict["scheduler"], dict):
+            config_dict["scheduler"] = SchedulerConfig(**config_dict["scheduler"])
+
+        # Apply overrides
+        config_dict.update({k: v for k, v in overrides.items() if v is not None})
+
         return cls(**config_dict)
 
     def to_dict(self) -> dict:

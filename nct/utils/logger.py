@@ -291,7 +291,9 @@ class NCTLogger:
         if pseudo_metrics:
             self.log(f"Pseudo Label Accuracy: {pseudo_metrics['accuracy']:.2%}", level=1)
             self.log(f"Pseudo Label F1: {pseudo_metrics['f1_score']:.4f}", level=1)
-            self.log(f"Worst Pseudo Group Accuracy: {pseudo_metrics['worst_group_accuracy']:.2%}", level=1)
+            self.log(f"Worst Pseudo Group Accuracy (All): {pseudo_metrics['worst_group_accuracy']:.2%}", level=1)
+            self.log(f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}", level=1)
+            self.log(f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}", level=1)
 
         # Print group-specific performance
         if group_results is not None:
@@ -305,7 +307,7 @@ class NCTLogger:
         self.log("", level=1)
 
     def log_transitions(self, iteration: int, prev_iteration: int, transitions: Dict[str, Any],
-                       group_labels=None, dataset_name: str = ""):
+                       group_labels=None, dataset_name: str = "", group_names: Optional[Dict[int, str]] = None):
         """Print transition statistics to console and log to wandb."""
         if self.verbose >= 2:
             self.log(
@@ -316,17 +318,9 @@ class NCTLogger:
             )
 
             if "per_group" in transitions and group_labels is not None:
-                from ..evaluation.analysis import get_waterbird_group_names
-                is_waterbird = dataset_name.lower() == "waterbird"
-                group_names_dict = get_waterbird_group_names() if is_waterbird else {}
-
                 self.log("  Per-Group Transitions:", level=2)
                 for group_id, stats in transitions["per_group"].items():
-                    group_name = (
-                        group_names_dict.get(group_id, f"Group {group_id}")
-                        if is_waterbird
-                        else f"Group {group_id}"
-                    )
+                    group_name = group_names.get(group_id, f"Group {group_id}") if group_names else f"Group {group_id}"
                     self.log(
                         f"    {group_name}: Forgetting={stats['correct_to_incorrect']}, "
                         f"Learning={stats['incorrect_to_correct']}",

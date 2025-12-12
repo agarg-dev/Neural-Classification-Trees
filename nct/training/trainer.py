@@ -16,7 +16,6 @@ from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 
 from ..core.config import OptimizerConfig, SchedulerConfig
-from ..evaluation.metrics import calculate_basic_metrics
 from .loss import compute_auxiliary_loss, compute_l1_penalty, weighted_bce_loss
 from .optimizer import create_optimizer, create_scheduler, create_two_stage_optimizer
 
@@ -357,8 +356,10 @@ class NCTTrainer:
                     epoch=epoch_offset + epoch + 1,
                     train_loss=train_loss,
                     val_loss=val_loss,
-                    val_acc=val_result.get("accuracy", 0.0),
-                    val_f1=val_result.get("f1", 0.0),
+                    val_acc=val_result.get(
+                        "accuracy", 0.0
+                    ),  # removed it from computation
+                    val_f1=val_result.get("f1", 0.0),  # removed it from computation
                     base_lr=base_lr,
                     head_lr=head_lr,
                     train_aux_loss=self._last_train_aux_loss,
@@ -381,8 +382,14 @@ class NCTTrainer:
                 self.patience_counter += 1
 
             current_epoch = epoch_offset + epoch + 1
-            self.logger.epoch_update(current_epoch, total_epochs, train_loss, val_loss,
-                                    self._last_train_aux_loss, self._last_val_aux_loss)
+            self.logger.epoch_update(
+                current_epoch,
+                total_epochs,
+                train_loss,
+                val_loss,
+                self._last_train_aux_loss,
+                self._last_val_aux_loss,
+            )
 
             if self.config["early_stopping"] and self.patience_counter >= patience:
                 self.logger.early_stop(phase_name, phase_num)
@@ -466,7 +473,9 @@ class NCTTrainer:
             num_batches += 1
 
         # Store auxiliary loss for logging
-        self._last_train_aux_loss = total_aux_loss / num_batches if use_aux_loss and num_batches > 0 else 0.0
+        self._last_train_aux_loss = (
+            total_aux_loss / num_batches if use_aux_loss and num_batches > 0 else 0.0
+        )
 
         return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -507,7 +516,9 @@ class NCTTrainer:
                 with autocast(self.device_type):
                     # Get outputs and optionally auxiliary outputs
                     if use_aux_loss:
-                        outputs, aux_outputs = self.model(images, return_aux_outputs=True)
+                        outputs, aux_outputs = self.model(
+                            images, return_aux_outputs=True
+                        )
                     else:
                         outputs = self.model(images)
 
@@ -530,18 +541,11 @@ class NCTTrainer:
                     all_labels.append(labels.cpu())
 
         # Store auxiliary loss for logging
-        self._last_val_aux_loss = total_aux_loss / num_batches if use_aux_loss and num_batches > 0 else 0.0
+        self._last_val_aux_loss = (
+            total_aux_loss / num_batches if use_aux_loss and num_batches > 0 else 0.0
+        )
 
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         result = {"loss": avg_loss}
-
-        if compute_metrics and len(all_preds) > 0:
-            all_preds = torch.cat(all_preds)
-            all_labels = torch.cat(all_labels)
-            metrics = calculate_basic_metrics(
-                all_labels.cpu().numpy(), all_preds.cpu().numpy()
-            )
-            result["accuracy"] = metrics["accuracy"]
-            result["f1"] = metrics["f1_score"]
 
         return result

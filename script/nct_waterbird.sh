@@ -6,7 +6,7 @@
 #SBATCH --partition=bigmem
 #SBATCH --gres=gpu:1
 #SBATCH --time=5:00:00
-#SBATCH --output=logs/nct_package_output_%j.log
+#SBATCH --output=logs/waterbird/nct_package_output_%j.log
 #SBATCH --error=logs/nct_package_error_%j.log
 
 # Create output directories
@@ -42,60 +42,20 @@ echo "Wandb Mode: offline"
 echo "Wandb Logs: $WANDB_DIR"
 echo "=========================================="
 
-# Hyperparameters
+# Configuration
 data_dir="/home/ankur.garg1/NCT/data"
-num_iterations=3
-epochs_per_iteration="100 100 100"
-initial_base_lr=8e-06
-initial_head_lr=8e-06
-lr_decay_factor=2
-batch_size=64
-seed=42
-weight_decay=1
-regularization_type="l2"
-lambda_l1=1e-5
-aux_loss_weight=0.6
-phase1_patience=10
-phase2_patience=10
-optimizer_type="adamw"
-scheduler_type="plateau"
-patience=3
-phase1_epochs_ratio="1 0.5 0.5"
-routing_strategy="argmax"
-confidence_threshold=0.5
-hierarchical_architecture="correct_label_routing"
-
-# Output directories
+# preset="/home/ankur.garg1/NCT/script/presets/waterbird_nct.yaml"
+preset="/home/ankur.garg1/NCT/script/presets/waterbird_nct_optuna.yaml"
 checkpoint_dir="/home/ankur.garg1/NCT/script/checkpoints"
 attribution_dir="/home/ankur.garg1/NCT/script/attributions"
 
 # Run training
-python /home/ankur.garg1/NCT/src/nct_package_main.py \
+python /home/ankur.garg1/NCT/src/nct_package_waterbird.py \
+    --preset $preset \
     --data_dir $data_dir \
-    --num_iterations $num_iterations \
-    --epochs_per_iteration $epochs_per_iteration \
-    --initial_base_lr $initial_base_lr \
-    --initial_head_lr $initial_head_lr \
-    --lr_decay_factor $lr_decay_factor \
-    --batch_size $batch_size \
-    --seed $seed \
-    --weight_decay $weight_decay \
-    --regularization_type $regularization_type \
-    --lambda_l1 $lambda_l1 \
-    --aux_loss_weight $aux_loss_weight \
-    --phase1_patience $phase1_patience \
-    --phase2_patience $phase2_patience \
-    --optimizer_type $optimizer_type \
-    --scheduler_type $scheduler_type \
-    --phase1_epochs_ratio $phase1_epochs_ratio \
-    --patience $patience \
-    --routing_strategy $routing_strategy \
-    --confidence_threshold $confidence_threshold \
     --checkpoint_dir $checkpoint_dir \
     --attribution_dir $attribution_dir \
-    --generate_attributions \
-    --scheduler_eta_min 1e-6 \
-    --hierarchical_architecture $hierarchical_architecture
+    --generate_attributions
 
 echo "=========================================="
 echo "NCT Package Training Complete"

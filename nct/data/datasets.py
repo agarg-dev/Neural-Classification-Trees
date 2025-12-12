@@ -1,8 +1,11 @@
 """Dataset classes for image data."""
 
+import os
 import torch
+import pandas as pd
+from PIL import Image
 from torch.utils.data import Dataset
-from typing import Tuple, Any
+from typing import Tuple, Any, Callable, Optional
 
 
 class IterativeDataset(Dataset):
@@ -25,6 +28,43 @@ class IterativeDataset(Dataset):
         if isinstance(hier_label, torch.Tensor):
             hier_label = hier_label.item()
         return image, hier_label
+
+
+class GenericImageDataset(Dataset):
+    """Generic dataset for loading images from metadata DataFrame."""
+
+    def __init__(
+        self,
+        metadata_df: pd.DataFrame,
+        root_dir: str,
+        img_filename_col: str = 'img_filename',
+        label_col: str = 'y',
+        transform: Optional[Callable] = None
+    ):
+        self.metadata = metadata_df.reset_index(drop=True)
+        self.root_dir = root_dir
+        self.img_filename_col = img_filename_col
+        self.label_col = label_col
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.metadata)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
+        img_path = os.path.join(self.root_dir, self.metadata.iloc[idx][self.img_filename_col])
+
+        try:
+            image = Image.open(img_path).convert('RGB')
+        except FileNotFoundError:
+            print(f"Error: Image not found at {img_path}")
+            image = Image.new('RGB', (256, 256), color='black')
+
+        label = int(self.metadata.iloc[idx][self.label_col])
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
 
 
 def extract_labels_from_dataset(dataset: Any) -> torch.Tensor:
