@@ -1,8 +1,9 @@
 """Logging utilities for NCT training."""
 
 import time
+from typing import Any, Dict, Optional
+
 import numpy as np
-from typing import Optional, Dict, Any
 
 
 class NCTLogger:
@@ -29,10 +30,10 @@ class NCTLogger:
         if self._wandb_enabled:
             # Extract only wandb-specific settings
             self._wandb_config = {
-                'project': config.wandb_project,
-                'entity': config.wandb_entity,
-                'run_name': config.wandb_run_name,
-                'tags': config.wandb_tags
+                "project": config.wandb_project,
+                "entity": config.wandb_entity,
+                "run_name": config.wandb_run_name,
+                "tags": config.wandb_tags,
             }
 
     def training_start(self, config: dict):
@@ -42,6 +43,7 @@ class NCTLogger:
         # Initialize wandb logger if enabled
         if self._wandb_enabled:
             from .wandb_logger import WandbLogger
+
             self.wandb_logger = WandbLogger(config, self._wandb_config, self.verbose)
 
         if self.verbose == 0:
@@ -50,16 +52,20 @@ class NCTLogger:
         if self.verbose >= 1:
             print("\nNCT Classifier Training")
             print("=" * 50)
-            print(f"Iterations: {config['num_iterations']}  |  "
-                  f"Backbone: {config['backbone']}  |  "
-                  f"Device: {config.get('device', 'auto')}")
+            print(
+                f"Iterations: {config['num_iterations']}  |  "
+                f"Backbone: {config['backbone']}  |  "
+                f"Device: {config.get('device', 'auto')}"
+            )
 
             # Log architecture mode
-            arch_mode = config.get('hierarchical_architecture', 'none')
+            arch_mode = config.get("hierarchical_architecture", "none")
             if arch_mode == "prediction_routing":
                 print("Architecture: Hierarchical (prediction-based routing)")
-                if config.get('routing_strategy') == 'confidence':
-                    print("  Note: Prediction routing uses correctness only (confidence routing disabled)")
+                if config.get("routing_strategy") == "correctness_certainty":
+                    print(
+                        "  Note: Using correctness+certainty routing (GMM-based uncertainty detection)"
+                    )
             elif arch_mode == "correct_label_routing":
                 print("Architecture: Hierarchical (correct label routing)")
             else:  # "none"
@@ -69,7 +75,15 @@ class NCTLogger:
                 print(f"Wandb: {self._wandb_config.get('project', 'nct-experiments')}")
             print()
 
-    def iteration_start(self, iteration: int, total_iterations: int, num_nodes: int, epochs: int, class_weights=None, class_counts=None):
+    def iteration_start(
+        self,
+        iteration: int,
+        total_iterations: int,
+        num_nodes: int,
+        epochs: int,
+        class_weights=None,
+        class_counts=None,
+    ):
         """Print iteration start message."""
         if self.verbose == 0:
             return
@@ -77,15 +91,21 @@ class NCTLogger:
         self.iteration_start_time = time.time()
 
         if self.verbose == 1:
-            print(f"\nIteration {iteration}/{total_iterations} [{num_nodes} nodes, {epochs} epochs]")
+            print(
+                f"\nIteration {iteration}/{total_iterations} [{num_nodes} nodes, {epochs} epochs]"
+            )
         elif self.verbose >= 2:
-            print(f"\n--- Iteration {iteration}/{total_iterations}: Training with {num_nodes} nodes for {epochs} epochs ---\n")
+            print(
+                f"\n--- Iteration {iteration}/{total_iterations}: Training with {num_nodes} nodes for {epochs} epochs ---\n"
+            )
 
             # Print hierarchical architecture info
             if self.config.hierarchical_architecture == "prediction_routing":
                 if iteration > 1:
                     num_parent_layers = iteration - 1
-                    print(f"  Tree Structure: {num_parent_layers} parent layer(s) → {num_nodes} output heads")
+                    print(
+                        f"  Tree Structure: {num_parent_layers} parent layer(s) → {num_nodes} output heads"
+                    )
                 else:
                     print(f"  Tree Structure: Base iteration (no parent layers yet)")
 
@@ -104,18 +124,37 @@ class NCTLogger:
 
         if self.verbose == 1:
             phase_label = "frozen backbone" if phase_num == 1 else "full model"
-            print(f"  Phase {phase_num} ({phase_label}): {epochs} epochs", end='', flush=True)
+            print(
+                f"  Phase {phase_num} ({phase_label}): {epochs} epochs",
+                end="",
+                flush=True,
+            )
         elif self.verbose >= 2:
             print(f"  {phase_name}")
 
-    def epoch_update(self, epoch: int, total_epochs: int, train_loss: float, val_loss: float,
-                     train_aux_loss: float = 0.0, val_aux_loss: float = 0.0):
+    def epoch_update(
+        self,
+        epoch: int,
+        total_epochs: int,
+        train_loss: float,
+        val_loss: float,
+        train_aux_loss: float = 0.0,
+        val_aux_loss: float = 0.0,
+        worst_group_acc: float = 0.0,
+    ):
         """Print epoch update (only for verbose=2)."""
         if self.verbose >= 2:
             aux_info = ""
             if train_aux_loss > 0 or val_aux_loss > 0:
-                aux_info = f", Train Aux: {train_aux_loss:.4f}, Val Aux: {val_aux_loss:.4f}"
-            print(f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}{aux_info}")
+                aux_info = (
+                    f", Train Aux: {train_aux_loss:.4f}, Val Aux: {val_aux_loss:.4f}"
+                )
+            wga_info = ""
+            if worst_group_acc > 0:
+                wga_info = f", Worst-Group Acc: {worst_group_acc:.3f}"
+            print(
+                f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}{aux_info}{wga_info}"
+            )
 
     def early_stop(self, phase_name: str, phase_num: int):
         """Print early stopping message."""
@@ -123,7 +162,7 @@ class NCTLogger:
             return
 
         if self.verbose == 1:
-            print(" → early stop", end='', flush=True)
+            print(" → early stop", end="", flush=True)
         elif self.verbose >= 2:
             print(f"    Early stopping triggered in {phase_name}.")
 
@@ -139,20 +178,26 @@ class NCTLogger:
         """Print weight transfer message."""
         if self.verbose >= 2:
             if hierarchical == "none":
-                print("  Transferring weights from previous iteration (parallel heads mode)")
+                print(
+                    "  Transferring weights from previous iteration (parallel heads mode)"
+                )
 
     def iteration_end(self):
         """Print iteration end message."""
         if self.verbose >= 1 and self.iteration_start_time:
             duration = time.time() - self.iteration_start_time
             if self.verbose == 1:
-                print(f"  ✓ Completed in {duration/60:.1f} min\n")
+                print(f"  ✓ Completed in {duration / 60:.1f} min\n")
             # For verbose=2, just add extra spacing
             elif self.verbose >= 2:
                 print()
 
-    def training_end(self, test_accuracy: Optional[float] = None, worst_group_acc: Optional[float] = None,
-                    finish_wandb: bool = True):
+    def training_end(
+        self,
+        test_accuracy: Optional[float] = None,
+        worst_group_acc: Optional[float] = None,
+        finish_wandb: bool = True,
+    ):
         """Print training end message and optionally finish logging.
 
         Args:
@@ -163,7 +208,7 @@ class NCTLogger:
         if self.verbose >= 1:
             if self.start_time:
                 total_duration = time.time() - self.start_time
-                print(f"\nTraining Complete ({total_duration/60:.1f} min total)")
+                print(f"\nTraining Complete ({total_duration / 60:.1f} min total)")
                 if test_accuracy is not None:
                     metrics_str = f"Final Test Accuracy: {test_accuracy:.2%}"
                     if worst_group_acc is not None:
@@ -189,9 +234,9 @@ class NCTLogger:
     @staticmethod
     def _to_numpy(tensor):
         """Convert tensor/array to numpy array."""
-        if hasattr(tensor, 'cpu'):
+        if hasattr(tensor, "cpu"):
             return tensor.cpu().numpy()
-        elif hasattr(tensor, 'numpy'):
+        elif hasattr(tensor, "numpy"):
             return tensor.numpy()
         return np.asarray(tensor)
 
@@ -199,37 +244,76 @@ class NCTLogger:
     # Wandb Logging Methods (Delegate to WandbLogger)
     # =========================================================================
 
-    def log_epoch_metrics(self, iteration: int, phase: int, epoch: int, train_loss: float,
-                         val_loss: float, val_acc: float, val_f1: float,
-                         base_lr: float, head_lr: float,
-                         train_acc: float = 0.0, worst_group_acc: float = 0.0,
-                         group_accuracies: Optional[Dict[int, float]] = None,
-                         train_aux_loss: float = 0.0, val_aux_loss: float = 0.0):
+    def log_epoch_metrics(
+        self,
+        iteration: int,
+        phase: int,
+        epoch: int,
+        train_loss: float,
+        val_loss: float,
+        val_acc: float,
+        val_f1: float,
+        base_lr: float,
+        head_lr: float,
+        train_acc: float = 0.0,
+        worst_group_acc: float = 0.0,
+        group_accuracies: Optional[Dict[int, float]] = None,
+        train_aux_loss: float = 0.0,
+        val_aux_loss: float = 0.0,
+    ):
         """Log per-epoch metrics including auxiliary loss."""
         if self.wandb_logger:
             self.wandb_logger.log_epoch_metrics(
-                iteration, phase, epoch, train_loss, train_acc, val_loss, val_acc,
-                val_f1, worst_group_acc, group_accuracies or {}, base_lr, head_lr,
-                train_aux_loss, val_aux_loss
+                iteration,
+                phase,
+                epoch,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
+                val_f1,
+                worst_group_acc,
+                group_accuracies or {},
+                base_lr,
+                head_lr,
+                train_aux_loss,
+                val_aux_loss,
             )
 
-    def log_iteration_summary(self, iteration: int, test_metrics: Dict[str, Any],
-                             group_metrics: Dict[str, Any], node_metrics: Dict[str, Any],
-                             training_time: float, num_epochs_trained: int = 0, early_stopped: bool = False):
+    def log_iteration_summary(
+        self,
+        iteration: int,
+        test_metrics: Dict[str, Any],
+        group_metrics: Dict[str, Any],
+        node_metrics: Dict[str, Any],
+        training_time: float,
+        num_epochs_trained: int = 0,
+        early_stopped: bool = False,
+    ):
         """Log summary metrics after iteration completes."""
         if self.wandb_logger:
             self.wandb_logger.log_iteration_summary(
-                iteration, test_metrics, group_metrics, node_metrics,
-                training_time, num_epochs_trained, early_stopped
+                iteration,
+                test_metrics,
+                group_metrics,
+                node_metrics,
+                training_time,
+                num_epochs_trained,
+                early_stopped,
             )
 
-    def log_transition_statistics(self, prev_iteration: int, curr_iteration: int,
-                                  transition_stats: Dict[str, Any]):
+    def log_transition_statistics(
+        self, prev_iteration: int, curr_iteration: int, transition_stats: Dict[str, Any]
+    ):
         """Log transition statistics between iterations."""
         if self.wandb_logger:
-            self.wandb_logger.log_transition_statistics(prev_iteration, curr_iteration, transition_stats)
+            self.wandb_logger.log_transition_statistics(
+                prev_iteration, curr_iteration, transition_stats
+            )
 
-    def log_attribution_image(self, image_path: str, caption: str, iteration: Optional[int] = None):
+    def log_attribution_image(
+        self, image_path: str, caption: str, iteration: Optional[int] = None
+    ):
         """Log attribution visualization image to wandb."""
         if self.wandb_logger:
             self.wandb_logger.log_attribution_image(image_path, caption, iteration)
@@ -241,95 +325,153 @@ class NCTLogger:
             if self.verbose == 1:
                 # Compact format for verbose=1
                 parts = []
-                if 'backbone_mean_abs_change' in weight_stats:
-                    parts.append(f"Backbone: {weight_stats['backbone_relative_change']*100:.2f}%")
-                if 'heads_mean_abs_change' in weight_stats:
-                    parts.append(f"Heads: {weight_stats['heads_relative_change']*100:.2f}%")
+                if "backbone_mean_abs_change" in weight_stats:
+                    parts.append(
+                        f"Backbone: {weight_stats['backbone_relative_change'] * 100:.2f}%"
+                    )
+                if "heads_mean_abs_change" in weight_stats:
+                    parts.append(
+                        f"Heads: {weight_stats['heads_relative_change'] * 100:.2f}%"
+                    )
                 if parts:
                     print(f"  Weight drift: {', '.join(parts)}")
 
             elif self.verbose >= 2:
                 # Detailed format for verbose>=2
                 print("  Weight Changes:")
-                if 'backbone_mean_abs_change' in weight_stats:
-                    print(f"    Backbone: mean Δ={weight_stats['backbone_mean_abs_change']:.6f}, "
-                          f"relative={weight_stats['backbone_relative_change']*100:.2f}%")
-                if 'heads_mean_abs_change' in weight_stats:
-                    print(f"    Heads: mean Δ={weight_stats['heads_mean_abs_change']:.6f}, "
-                          f"relative={weight_stats['heads_relative_change']*100:.2f}%")
+                if "backbone_mean_abs_change" in weight_stats:
+                    print(
+                        f"    Backbone: mean Δ={weight_stats['backbone_mean_abs_change']:.6f}, "
+                        f"relative={weight_stats['backbone_relative_change'] * 100:.2f}%"
+                    )
+                if "heads_mean_abs_change" in weight_stats:
+                    print(
+                        f"    Heads: mean Δ={weight_stats['heads_mean_abs_change']:.6f}, "
+                        f"relative={weight_stats['heads_relative_change'] * 100:.2f}%"
+                    )
 
         # Log to wandb
         if self.wandb_logger:
             self.wandb_logger.log_weight_statistics(iteration, weight_stats)
 
     def log_routing_statistics(self, routing_stats: Dict[str, int]):
-        """Log sample routing statistics for confidence-based routing."""
+        """Log sample routing statistics for correctness_certainty routing."""
         if self.verbose >= 2:
-            num_wrong = routing_stats['num_wrong']
-            num_low_conf = routing_stats['num_low_confidence']
-            num_difficult = routing_stats['num_difficult']
-            total = routing_stats['total']
+            num_wrong = routing_stats["num_wrong"]
+            num_uncertain = routing_stats["num_uncertain"]
+            num_difficult = routing_stats["num_difficult"]
+            total = routing_stats["total"]
             ratio = num_difficult / total if total > 0 else 0
-            print(f"  Routing: {num_wrong} wrong + {num_low_conf} low-confidence → "
-                  f"{num_difficult} difficult ({ratio*100:.1f}%)")
+            print(
+                f"  Routing: {num_wrong} wrong + {num_uncertain} uncertain → "
+                f"{num_difficult} difficult ({ratio * 100:.1f}%)"
+            )
 
         if self.wandb_logger:
             self.wandb_logger.log_routing_statistics(routing_stats)
 
-    def log_evaluation_results(self, test_metrics: Dict[str, Any],
-                              pseudo_metrics: Optional[Dict[str, Any]] = None,
-                              group_results: Optional[Dict[str, Any]] = None):
+    def log_evaluation_results(
+        self,
+        test_metrics: Dict[str, Any],
+        pseudo_metrics: Optional[Dict[str, Any]] = None,
+        group_results: Optional[Dict[str, Any]] = None,
+    ):
         """Print evaluation results to console based on verbosity level."""
         if self.verbose == 0:
             return
 
         # Print basic metrics
         self.log(f"Test Accuracy: {test_metrics['accuracy']:.2%}", level=1)
+        self.log(f"Test Precision: {test_metrics['precision']:.4f}", level=1)
+        self.log(f"Test Recall: {test_metrics['recall']:.4f}", level=1)
         self.log(f"Test F1 Score: {test_metrics['f1_score']:.4f}", level=1)
+        if "auroc" in test_metrics:
+            import math
+
+            if not math.isnan(test_metrics["auroc"]):
+                self.log(f"Test AUROC: {test_metrics['auroc']:.4f}", level=1)
 
         # Print pseudo label metrics if available
         if pseudo_metrics:
-            self.log(f"Pseudo Label Accuracy: {pseudo_metrics['accuracy']:.2%}", level=1)
+            self.log(
+                f"Pseudo Label Accuracy: {pseudo_metrics['accuracy']:.2%}", level=1
+            )
             self.log(f"Pseudo Label F1: {pseudo_metrics['f1_score']:.4f}", level=1)
-            self.log(f"Worst Pseudo Group Accuracy (All): {pseudo_metrics['worst_group_accuracy']:.2%}", level=1)
-            self.log(f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}", level=1)
-            self.log(f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}", level=1)
+            self.log(
+                f"Worst Pseudo Group Accuracy (All): {pseudo_metrics['worst_group_accuracy']:.2%}",
+                level=1,
+            )
+            self.log(
+                f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}",
+                level=1,
+            )
+            self.log(
+                f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}",
+                level=1,
+            )
 
         # Print group-specific performance
         if group_results is not None:
             self.log("\n--- Group-Specific Performance ---", level=1)
             for group_name, metrics in group_results["group_metrics"].items():
-                self.log(f"  Accuracy for '{group_name}': {metrics['accuracy']:.2%}", level=1)
+                acc_str = f"Acc: {metrics['accuracy']:.2%}"
+                if "auroc" in metrics and not math.isnan(metrics["auroc"]):
+                    acc_str += f", AUROC: {metrics['auroc']:.4f}"
+                self.log(f"  {group_name}: {acc_str}", level=1)
 
-            self.log(f"\nWorst-Group Accuracy: {group_results['summary']['worst_group_accuracy']:.2%}", level=1)
+            self.log(
+                f"\nWorst-Group Accuracy: {group_results['summary']['worst_group_accuracy']:.2%}",
+                level=1,
+            )
+            if "worst_group_auroc" in group_results["summary"]:
+                self.log(
+                    f"Worst-Group AUROC: {group_results['summary']['worst_group_auroc']:.4f}",
+                    level=1,
+                )
 
         # Print trailing newline (matches old behavior)
         self.log("", level=1)
 
-    def log_transitions(self, iteration: int, prev_iteration: int, transitions: Dict[str, Any],
-                       group_labels=None, dataset_name: str = "", group_names: Optional[Dict[int, str]] = None):
+    def log_transitions(
+        self,
+        iteration: int,
+        prev_iteration: int,
+        transitions: Dict[str, Any],
+        group_labels=None,
+        dataset_name: str = "",
+        group_names: Optional[Dict[int, str]] = None,
+    ):
         """Print transition statistics to console and log to wandb."""
         if self.verbose >= 2:
             self.log(
                 f"\nIteration {prev_iteration} to {iteration} Transitions: "
                 f"Forgetting={transitions['overall']['correct_to_incorrect']}, "
                 f"Learning={transitions['overall']['incorrect_to_correct']}",
-                level=2
+                level=2,
             )
 
             if "per_group" in transitions and group_labels is not None:
                 self.log("  Per-Group Transitions:", level=2)
                 for group_id, stats in transitions["per_group"].items():
-                    group_name = group_names.get(group_id, f"Group {group_id}") if group_names else f"Group {group_id}"
+                    group_name = (
+                        group_names.get(group_id, f"Group {group_id}")
+                        if group_names
+                        else f"Group {group_id}"
+                    )
                     self.log(
                         f"    {group_name}: Forgetting={stats['correct_to_incorrect']}, "
                         f"Learning={stats['incorrect_to_correct']}",
-                        level=2
+                        level=2,
                     )
 
         # Log to wandb
         if self.wandb_logger:
-            self.wandb_logger.log_transition_statistics(prev_iteration, iteration, transitions)
+            self.wandb_logger.log_transition_statistics(
+                prev_iteration, iteration, transitions
+            )
+            self.wandb_logger.log_transition_statistics(
+                prev_iteration, iteration, transitions
+            )
 
     def finish_wandb(self):
         """Finish wandb run."""

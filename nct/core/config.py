@@ -114,6 +114,9 @@ class NCTConfig:
 
     # Loss parameters
     use_class_weights: bool = True
+    max_class_weight: Optional[float] = (
+        None  # Maximum class weight cap (None = no clamping)
+    )
     regularization_type: str = "l2"  # 'l1', 'l2', 'elastic_net', 'none'
     lambda_l1: float = 1e-4  # L1 regularization coefficient
     aux_loss_weight: float = 0.3  # Weight for auxiliary parent loss (0.0 = disabled)
@@ -123,13 +126,17 @@ class NCTConfig:
     phase1_patience: int = 10
     phase2_patience: int = 10
     early_stopping: bool = True
+    model_selection_criterion: str = "auto"  # 'val_loss', 'wga', or 'auto' (auto = val_loss for iter1, wga for iter2+)
     save_iteration_checkpoints: bool = True
     checkpoint_dir: str = "./checkpoints"
     attribution_dir: str = "./attributions"
 
     # Routing strategy
-    routing_strategy: str = "argmax"  # 'argmax' or 'confidence'
-    confidence_threshold: float = 0.7
+    # Options:
+    # - 'correctness': Route purely by prediction correctness (Default)
+    # - 'correctness_certainty': Incorrect -> Hard, Correct but Uncertain -> Hard
+    routing_strategy: str = "correctness"
+    node_balanced_sampling: bool = False
 
     # Hierarchical architecture mode
     hierarchical_architecture: str = (
@@ -138,8 +145,11 @@ class NCTConfig:
 
     # Data parameters
     image_size: int = 224
-    num_workers: int = 8
+    num_workers: int = 0
     pin_memory: bool = True
+    cache_images_in_memory: bool = (
+        False  # Cache PIL images in RAM (causes OOM on large datasets)
+    )
 
     # System parameters
     seed: Optional[int] = 42
@@ -188,10 +198,16 @@ class NCTConfig:
                 f"regularization_type must be one of {valid_reg_types}, got '{self.regularization_type}'"
             )
 
-        valid_routing_strategies = ["argmax", "confidence"]
+        valid_routing_strategies = ["correctness", "correctness_certainty"]
         if self.routing_strategy not in valid_routing_strategies:
             raise ValueError(
                 f"routing_strategy must be one of {valid_routing_strategies}, got '{self.routing_strategy}'"
+            )
+
+        valid_model_selection_criteria = ["val_loss", "wga", "auto"]
+        if self.model_selection_criterion not in valid_model_selection_criteria:
+            raise ValueError(
+                f"model_selection_criterion must be one of {valid_model_selection_criteria}, got '{self.model_selection_criterion}'"
             )
 
         valid_hierarchical_modes = [
@@ -203,6 +219,14 @@ class NCTConfig:
             raise ValueError(
                 f"hierarchical_architecture must be one of {valid_hierarchical_modes}, got '{self.hierarchical_architecture}'"
             )
+
+        # Force num_workers=0 when caching images in memory to avoid OOM from worker duplication
+        if self.cache_images_in_memory and self.num_workers > 0:
+            print(
+                f"Warning: num_workers={self.num_workers} with cache_images_in_memory=True "
+                f"can cause OOM. Setting num_workers=0."
+            )
+            self.num_workers = 0
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "NCTConfig":

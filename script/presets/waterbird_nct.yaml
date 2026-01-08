@@ -33,19 +33,19 @@ scheduler:
 
 # Loss and regularization
 use_class_weights: true
+max_class_weight: 20.0 # Cap class weights to prevent extreme imbalance effects
 regularization_type: l2
 lambda_l1: 1.0e-05
 aux_loss_weight: 0.6
 
 # Training phases
 phase1_epochs_ratio: [1.0, 0.5, 0.5]
-phase1_patience: 10
-phase2_patience: 10
+phase1_patience: 15
+phase2_patience: 5
 early_stopping: true
 
 # Routing strategy
-routing_strategy: argmax
-confidence_threshold: 0.5
+routing_strategy: correctness
 hierarchical_architecture: correct_label_routing
 
 # Data parameters
@@ -86,7 +86,6 @@ attribution_dir: ./attributions
 # scheduler_type="plateau"
 # patience=3
 # phase1_epochs_ratio="1 0.5 0.5"
-# routing_strategy="argmax"
-# confidence_threshold=0.5
+# routing_strategy="correctness"
 # hierarchical_architecture="correct_label_routing"
 # head_hidden_dim=256

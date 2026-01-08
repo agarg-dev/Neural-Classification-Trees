@@ -6,8 +6,8 @@
 #SBATCH --partition=gpu-h100
 #SBATCH --gres=gpu:1
 #SBATCH --time=20:00:00
-#SBATCH --output=logs/nct_erm_tuning_%j.log
-#SBATCH --error=logs/nct_erm_tuning_%j.log
+#SBATCH --output=logs/erm_optuna/nct_erm_tuning_%j.log
+#SBATCH --error=logs/erm_optuna/nct_erm_tuning_%j.log
 
 # Create logs directory if it doesn't exist
 mkdir -p logs

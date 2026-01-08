@@ -104,7 +104,11 @@ def main():
 
     # Prepare data
     print("Loading Waterbird dataset...")
-    data = prepare_dataset(args.data_dir, dataset_name="waterbird")
+    data = prepare_dataset(
+        args.data_dir,
+        dataset_name="waterbird",
+        cache_images_in_memory=config.cache_images_in_memory,
+    )
     dataset_config = data["config"]
 
     # Create NCT classifier with config

@@ -1,15 +1,16 @@
 """Loss functions for hierarchical classification."""
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 
 def weighted_bce_loss(
     outputs: torch.Tensor,
     targets: torch.Tensor,
-    class_weights: Optional[torch.Tensor] = None
+    class_weights: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Calculates binary cross-entropy loss with optional class-specific weights.
@@ -25,7 +26,7 @@ def weighted_bce_loss(
 
     # Calculate unreduced BCE loss
     unreduced_loss = F.binary_cross_entropy_with_logits(
-        outputs, target_one_hot, reduction='none'
+        outputs, target_one_hot, reduction="none"
     )
 
     if class_weights is not None:
@@ -35,7 +36,6 @@ def weighted_bce_loss(
         return weighted_loss.mean()
     else:
         return unreduced_loss.mean()
-
 
 
 def compute_l1_penalty(model: nn.Module) -> torch.Tensor:
@@ -54,10 +54,43 @@ def compute_l1_penalty(model: nn.Module) -> torch.Tensor:
     return l1_penalty
 
 
+def compute_l1_penalty_heads(model: nn.Module) -> torch.Tensor:
+    """
+    Compute L1 regularization penalty on classification layers only.
+
+    Applies L1 to layer 3 (final Linear) of each head, not the feature
+    transformation layers (0-2) which are reused by child heads.
+
+    Args:
+        model: HierarchicalClassifier model
+    Returns:
+        torch.Tensor: L1 penalty on classifier weights only
+    """
+    l1_penalty = torch.tensor(0.0, device=next(model.parameters()).device)
+
+    # Output heads: layer 3 (classifier)
+    for head in model.output_heads:
+        for param in head[3].parameters():
+            if param.requires_grad:
+                l1_penalty += torch.sum(torch.abs(param))
+
+    # Parent heads: layer 3 (classifier)
+    if hasattr(model, "parent_layers"):
+        for parent_layer in model.parent_layers:
+            for head in parent_layer:
+                if len(head) > 3:
+                    for param in head[3].parameters():
+                        if param.requires_grad:
+                            l1_penalty += torch.sum(torch.abs(param))
+
+    return l1_penalty
+
+
 def compute_class_weights(
     labels: torch.Tensor,
     num_classes: int,
-    return_counts: bool = False
+    return_counts: bool = False,
+    max_weight: Optional[float] = None,
 ):
     """
     Compute balanced class weights for imbalanced datasets.
@@ -69,6 +102,7 @@ def compute_class_weights(
         labels: Training labels
         num_classes: Number of classes
         return_counts: If True, return (weights, counts) tuple
+        max_weight: Optional maximum weight cap to prevent extreme imbalance effects
     Returns:
         torch.Tensor or tuple: Balanced class weights, or (weights, counts) if return_counts=True
     """
@@ -82,6 +116,10 @@ def compute_class_weights(
     total_samples = len(labels)
     class_weights = total_samples / (num_classes * class_counts)
 
+    # Apply weight clamping if specified
+    if max_weight is not None:
+        class_weights = class_weights.clamp(max=max_weight)
+
     if return_counts:
         return class_weights, class_counts.int()
     return class_weights
@@ -91,7 +129,8 @@ def compute_auxiliary_loss(
     aux_outputs: list,
     labels: torch.Tensor,
     iteration: int,
-    class_weights: Optional[torch.Tensor] = None
+    class_weights: Optional[torch.Tensor] = None,
+    max_weight: Optional[float] = None,
 ) -> torch.Tensor:
     """
     Compute auxiliary loss for parent layer classifications.
@@ -122,7 +161,11 @@ def compute_auxiliary_loss(
     parent_class_weights = None
     if class_weights is not None:
         num_parent_classes = 2 ** (iteration - 1)
-        parent_class_weights = compute_class_weights(parent_labels, num_parent_classes)
+        parent_class_weights = compute_class_weights(
+            parent_labels,
+            num_parent_classes,
+            max_weight=max_weight,
+        )
         parent_class_weights = parent_class_weights.to(class_weights.device)
 
     # Compute loss for parent's classification task

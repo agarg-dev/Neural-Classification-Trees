@@ -37,8 +37,7 @@ Fixed hyperparameters:
 - epochs: 100 (fixed for both iterations)
 - regularization_type: 'l2'
 - lambda_l1: 0.0
-- routing_strategy: 'argmax'
-- confidence_threshold: 0.7
+- routing_strategy: 'correctness'
 - optimizer: AdamW
 - hierarchical_architecture: 'correct_label_routing' (true label-based hierarchical routing)
 
@@ -241,8 +240,7 @@ def objective(trial: optuna.Trial, data: Dict, seed: int) -> float:
     # ========== FIXED HYPERPARAMETERS ==========
     regularization_type = "l2"
     lambda_l1 = 0.0
-    routing_strategy = "argmax"
-    confidence_threshold = 0.7
+    routing_strategy = "correctness"
     optimizer_type = "adamw"
     momentum = 0.9
     nesterov = True
@@ -278,7 +276,6 @@ def objective(trial: optuna.Trial, data: Dict, seed: int) -> float:
         regularization_type=regularization_type,
         lambda_l1=lambda_l1,
         routing_strategy=routing_strategy,
-        confidence_threshold=confidence_threshold,
         hierarchical_architecture="correct_label_routing",
         aux_loss_weight=aux_loss_weight,
         seed=seed,
@@ -485,8 +482,7 @@ def main():
         head_dropout=0.3,  # Fixed
         regularization_type="l2",  # Fixed
         lambda_l1=0.0,  # Fixed
-        routing_strategy="argmax",  # Fixed
-        confidence_threshold=0.7,  # Fixed
+        routing_strategy="correctness",  # Fixed
         hierarchical_architecture="correct_label_routing",
         aux_loss_weight=best_params["aux_loss_weight"],
         seed=args.seed,
@@ -563,8 +559,7 @@ def main():
         head_dropout=0.3,
         regularization_type="l2",
         lambda_l1=0.0,
-        routing_strategy="argmax",
-        confidence_threshold=0.7,
+        routing_strategy="correctness",
         hierarchical_architecture="correct_label_routing",
         aux_loss_weight=best_params["aux_loss_weight"],
         seed=args.seed,

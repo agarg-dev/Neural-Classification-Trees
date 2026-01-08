@@ -6,8 +6,8 @@
 #SBATCH --partition=gpu-h100
 #SBATCH --gres=gpu:1
 #SBATCH --time=5:00:00
-#SBATCH --output=logs/attributions_all_%j.log
-#SBATCH --error=logs/attributions_all_error_%j.log
+#SBATCH --output=logs/attribution_image/attributions_%j.log
+#SBATCH --error=logs/attribution_image/attributions_error_%j.log
 
 export PYTHONUNBUFFERED=1
 

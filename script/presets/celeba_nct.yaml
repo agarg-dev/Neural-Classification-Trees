@@ -1,4 +1,5 @@
 # NCT Configuration for CelebA Dataset (Blond Hair)
+# Consistent structure with Waterbird presets
 
 # Training parameters
 num_iterations: 3
@@ -19,19 +20,21 @@ lr_decay_factor: 1.5
 
 # Optimizer configuration
 optimizer:
-  type: adamw
-  weight_decay: 0.1
-  betas: [0.9, 0.999]
+    type: adamw
+    weight_decay: 0.1
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
 
 # Scheduler configuration
 scheduler:
-  type: plateau
-  patience: 5
-  factor: 0.5
-  eta_min: 1.0e-06
+    type: plateau
+    patience: 5
+    factor: 0.5
+    eta_min: 1.0e-06
 
 # Loss and regularization
 use_class_weights: true
+max_class_weight: 20.0 # Cap class weights to prevent extreme imbalance effects
 regularization_type: l2
 lambda_l1: 0.0
 aux_loss_weight: 0.5
@@ -41,11 +44,12 @@ phase1_epochs_ratio: [1.0, 0.5, 0.5]
 phase1_patience: 8
 phase2_patience: 8
 early_stopping: true
+model_selection_criterion: auto
 
 # Routing strategy
-routing_strategy: argmax
-confidence_threshold: 0.7
+routing_strategy: correctness
 hierarchical_architecture: correct_label_routing
+node_balanced_sampling: false
 
 # Data parameters
 image_size: 224
@@ -61,9 +65,10 @@ verbose: 2
 wandb_enabled: true
 wandb_project: nct-celeba
 wandb_entity: ankurgarg-university-of-calgary-in-alberta
-wandb_tags: [arc, celeba, blond-hair]
+wandb_tags: [arc, celeba, blond-hair, resnet50]
 
 # Checkpoint settings
 save_iteration_checkpoints: true
 checkpoint_dir: ./checkpoints
 attribution_dir: ./attributions
+# {'initial_base_lr': 1e-06, 'initial_head_lr': 5e-05, 'lr_decay_factor': 1.25, 'weight_decay': 0.1, 'lambda_l1': 0.01, 'head_hidden_dim': 64, 'head_dropout': 0.0, 'phase1_ratio_iter2': 0.25}

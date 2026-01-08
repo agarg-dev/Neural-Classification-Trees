@@ -16,7 +16,12 @@ from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 
 from ..core.config import OptimizerConfig, SchedulerConfig
-from .loss import compute_auxiliary_loss, compute_l1_penalty, weighted_bce_loss
+from .loss import (
+    compute_auxiliary_loss,
+    compute_l1_penalty,
+    compute_l1_penalty_heads,
+    weighted_bce_loss,
+)
 from .optimizer import create_optimizer, create_scheduler, create_two_stage_optimizer
 
 
@@ -59,6 +64,7 @@ class NCTTrainer:
 
         # Early stopping tracking
         self.best_val_loss = float("inf")
+        self.best_worst_group_acc = 0.0  # Track best pseudo worst-group accuracy
         self.patience_counter = 0
         self.best_model_weights = None
         self.total_epochs_trained = 0
@@ -113,6 +119,7 @@ class NCTTrainer:
             total_epochs=epochs,
         )
         phase1_best_loss = self.best_val_loss
+        phase1_best_wga = self.best_worst_group_acc
         phase1_best_weights = copy.deepcopy(self.best_model_weights)
 
         # Load best weights from phase 1 before starting phase 2
@@ -133,15 +140,31 @@ class NCTTrainer:
             epoch_offset=phase1_epochs,
         )
         phase2_best_loss = self.best_val_loss
+        phase2_best_wga = self.best_worst_group_acc
         phase2_best_weights = copy.deepcopy(self.best_model_weights)
 
-        # Load best model from either phase
-        if phase1_best_loss < phase2_best_loss:
-            self.model.load_state_dict(phase1_best_weights)
-            self.best_model_weights = phase1_best_weights
+        # Load best model from either phase based on the early stopping criterion
+        criterion = self.config.get("model_selection_criterion", "auto")
+        use_wga_for_selection = (criterion == "wga") or (
+            criterion == "auto" and self.iteration_num > 1
+        )
+
+        if use_wga_for_selection:
+            # Higher is better for worst-group accuracy
+            if phase1_best_wga > phase2_best_wga:
+                self.model.load_state_dict(phase1_best_weights)
+                self.best_model_weights = phase1_best_weights
+            else:
+                self.model.load_state_dict(phase2_best_weights)
+                self.best_model_weights = phase2_best_weights
         else:
-            self.model.load_state_dict(phase2_best_weights)
-            self.best_model_weights = phase2_best_weights
+            # Lower is better for validation loss
+            if phase1_best_loss < phase2_best_loss:
+                self.model.load_state_dict(phase1_best_weights)
+                self.best_model_weights = phase1_best_weights
+            else:
+                self.model.load_state_dict(phase2_best_weights)
+                self.best_model_weights = phase2_best_weights
 
         return {
             "phase1_results": phase1_results,
@@ -155,6 +178,7 @@ class NCTTrainer:
     def _reset_early_stopping(self):
         """Reset early stopping tracking for new phase."""
         self.best_val_loss = float("inf")
+        self.best_worst_group_acc = -1.0  # Initialize to -1 so first epoch always saves
         self.patience_counter = 0
         self.best_model_weights = copy.deepcopy(self.model.state_dict())
 
@@ -331,6 +355,26 @@ class NCTTrainer:
         phase_num = 1 if "Phase 1" in phase_name else 2
         log_metrics = self.config["log_epoch_metrics"]
 
+        # Log early stopping criterion for this iteration
+        criterion = self.config.get("model_selection_criterion", "auto")
+        if criterion == "val_loss":
+            self.logger.log("    Early stopping criterion: val_loss", level=2)
+        elif criterion == "wga":
+            self.logger.log(
+                "    Early stopping criterion: pseudo WGA (filled groups)", level=2
+            )
+        else:  # "auto"
+            if self.iteration_num == 1:
+                self.logger.log(
+                    "    Early stopping criterion: val_loss (auto: iteration 1)",
+                    level=2,
+                )
+            else:
+                self.logger.log(
+                    "    Early stopping criterion: pseudo WGA (auto: iteration 2+)",
+                    level=2,
+                )
+
         for epoch in range(epochs):
             train_loss = self._train_epoch(train_loader, optimizer, class_weights)
             train_losses.append(train_loss)
@@ -356,14 +400,13 @@ class NCTTrainer:
                     epoch=epoch_offset + epoch + 1,
                     train_loss=train_loss,
                     val_loss=val_loss,
-                    val_acc=val_result.get(
-                        "accuracy", 0.0
-                    ),  # removed it from computation
-                    val_f1=val_result.get("f1", 0.0),  # removed it from computation
+                    val_acc=val_result.get("accuracy", 0.0),
+                    val_f1=val_result.get("f1", 0.0),
                     base_lr=base_lr,
                     head_lr=head_lr,
                     train_aux_loss=self._last_train_aux_loss,
                     val_aux_loss=self._last_val_aux_loss,
+                    worst_group_acc=val_result.get("worst_group_accuracy", 0.0),
                 )
 
             if scheduler is not None:
@@ -374,12 +417,39 @@ class NCTTrainer:
                 else:
                     scheduler.step()
 
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                self.best_model_weights = copy.deepcopy(self.model.state_dict())
+            # Early stopping criterion selection:
+            # - "val_loss": Always use validation loss
+            # - "wga": Always use pseudo worst-group accuracy (filled groups only)
+            # - "auto": val_loss for iteration 1, wga for iteration 2+
+            criterion = self.config.get("model_selection_criterion", "auto")
+
+            if criterion == "val_loss":
+                use_wga = False
+            elif criterion == "wga":
+                use_wga = "worst_group_accuracy_filled" in val_result
+            else:  # "auto"
+                use_wga = (
+                    self.iteration_num > 1
+                ) and "worst_group_accuracy_filled" in val_result
+
+            if use_wga:
+                # Higher is better for worst-group accuracy (use filled groups only)
+                worst_group_acc = val_result["worst_group_accuracy_filled"]
+                if worst_group_acc > self.best_worst_group_acc:
+                    self.best_worst_group_acc = worst_group_acc
+                    self.best_val_loss = val_loss  # Also update for logging
+                    self.patience_counter = 0
+                    self.best_model_weights = copy.deepcopy(self.model.state_dict())
+                else:
+                    self.patience_counter += 1
             else:
-                self.patience_counter += 1
+                # Use validation loss
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
+                    self.patience_counter = 0
+                    self.best_model_weights = copy.deepcopy(self.model.state_dict())
+                else:
+                    self.patience_counter += 1
 
             current_epoch = epoch_offset + epoch + 1
             self.logger.epoch_update(
@@ -389,6 +459,7 @@ class NCTTrainer:
                 val_loss,
                 self._last_train_aux_loss,
                 self._last_val_aux_loss,
+                worst_group_acc=val_result.get("worst_group_accuracy", 0.0),
             )
 
             if self.config["early_stopping"] and self.patience_counter >= patience:
@@ -453,7 +524,11 @@ class NCTTrainer:
                 # Auxiliary loss
                 if use_aux_loss:
                     aux_loss = compute_auxiliary_loss(
-                        aux_outputs, labels, self.iteration_num, class_weights
+                        aux_outputs,
+                        labels,
+                        self.iteration_num,
+                        class_weights,
+                        max_weight=self.config.get("max_class_weight"),
                     )
                     weighted_aux = aux_weight * aux_loss
                     loss = loss + weighted_aux
@@ -463,7 +538,8 @@ class NCTTrainer:
                 if self.config["regularization_type"] in ["l1", "elastic_net"]:
                     lambda_l1 = self.config["lambda_l1"]
                     if lambda_l1 > 0:
-                        loss += lambda_l1 * compute_l1_penalty(self.model)
+                        loss += lambda_l1 * compute_l1_penalty_heads(self.model)
+                        # loss += lambda_l1 * compute_l1_penalty(self.model)
 
             self.scaler.scale(loss).backward()
             self.scaler.step(optimizer)
@@ -492,7 +568,7 @@ class NCTTrainer:
             class_weights: Class weights for loss computation.
             compute_metrics: Whether to compute accuracy/F1 (slower)
         Returns:
-            Dictionary with loss and optionally metrics (accuracy, f1).
+            Dictionary with loss, pseudo worst-group accuracy, and optionally other metrics.
         """
         self.model.eval()
         total_loss = 0.0
@@ -528,17 +604,21 @@ class NCTTrainer:
                     # Auxiliary loss (computed separately, not added to loss for validation)
                     if use_aux_loss:
                         aux_loss = compute_auxiliary_loss(
-                            aux_outputs, labels, self.iteration_num, class_weights
+                            aux_outputs,
+                            labels,
+                            self.iteration_num,
+                            class_weights,
+                            max_weight=self.config.get("max_class_weight"),
                         )
                         total_aux_loss += aux_loss.item()
 
                 total_loss += loss.item()
                 num_batches += 1
 
-                if compute_metrics:
-                    preds = torch.argmax(outputs, dim=1)
-                    all_preds.append(preds.cpu())
-                    all_labels.append(labels.cpu())
+                # Always collect predictions and labels for pseudo worst-group accuracy
+                preds = torch.argmax(outputs, dim=1)
+                all_preds.append(preds.cpu())
+                all_labels.append(labels.cpu())
 
         # Store auxiliary loss for logging
         self._last_val_aux_loss = (
@@ -547,5 +627,38 @@ class NCTTrainer:
 
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         result = {"loss": avg_loss}
+
+        # Compute pseudo worst-group accuracy (per hierarchical node)
+        if len(all_preds) > 0:
+            all_preds = torch.cat(all_preds)
+            all_labels = torch.cat(all_labels)
+
+            # Number of pseudo-groups = number of hierarchical nodes at this iteration
+            num_groups = 2**self.iteration_num
+
+            # Compute per-group accuracy
+            group_accuracies = []
+            for group_id in range(num_groups):
+                group_mask = all_labels == group_id
+                group_count = group_mask.sum().item()
+
+                if group_count > 0:
+                    group_correct = (
+                        (all_preds[group_mask] == all_labels[group_mask]).sum().item()
+                    )
+                    group_acc = group_correct / group_count
+                    group_accuracies.append(group_acc)
+
+            # Pseudo worst-group accuracy (minimum across filled hierarchical nodes)
+            if len(group_accuracies) > 0:
+                worst_group_acc = min(group_accuracies)
+                avg_acc = sum(group_accuracies) / len(group_accuracies)
+                result["worst_group_accuracy"] = worst_group_acc
+                result["worst_group_accuracy_filled"] = (
+                    worst_group_acc  # Same as above (only filled groups counted)
+                )
+                result["accuracy"] = avg_acc
+                result["num_groups_present"] = len(group_accuracies)
+                result["num_groups_expected"] = num_groups
 
         return result

@@ -6,8 +6,8 @@
 #SBATCH --partition=bigmem
 #SBATCH --gres=gpu:1
 #SBATCH --time=5:00:00
-#SBATCH --output=logs/waterbird/nct_package_output_%j.log
-#SBATCH --error=logs/nct_package_error_%j.log
+#SBATCH --output=logs/waterbird/nct_waterbird_output_%j.log
+#SBATCH --error=logs/waterbird/nct_waterbird_error_%j.log
 
 # Create output directories
 mkdir -p logs

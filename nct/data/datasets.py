@@ -1,11 +1,12 @@
 """Dataset classes for image data."""
 
 import os
-import torch
+from typing import Any, Callable, Optional, Tuple
+
 import pandas as pd
+import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from typing import Tuple, Any, Callable, Optional
 
 
 class IterativeDataset(Dataset):
@@ -13,11 +14,13 @@ class IterativeDataset(Dataset):
     Wrapper dataset for iterative training with dynamic labels.
     Works with any base dataset - overrides labels for hierarchical training.
     """
+
     def __init__(self, base_dataset: Dataset, hier_labels: torch.Tensor):
         self.base_dataset = base_dataset
         self.hier_labels = hier_labels
-        assert len(self.base_dataset) == len(self.hier_labels), \
+        assert len(self.base_dataset) == len(self.hier_labels), (
             "Base dataset and labels must have the same length."
+        )
 
     def __len__(self):
         return len(self.base_dataset)
@@ -37,29 +40,63 @@ class GenericImageDataset(Dataset):
         self,
         metadata_df: pd.DataFrame,
         root_dir: str,
-        img_filename_col: str = 'img_filename',
-        label_col: str = 'y',
-        transform: Optional[Callable] = None
+        img_filename_col: str = "img_filename",
+        label_col: str = "y",
+        transform: Optional[Callable] = None,
+        cache_images_in_memory: bool = False,
     ):
         self.metadata = metadata_df.reset_index(drop=True)
         self.root_dir = root_dir
         self.img_filename_col = img_filename_col
         self.label_col = label_col
         self.transform = transform
+        self.cache_images_in_memory = cache_images_in_memory
+        self._image_cache = {} if cache_images_in_memory else None
+
+        if cache_images_in_memory:
+            self._preload_cache()
+
+    def _preload_cache(self):
+        """Pre-load all images into cache."""
+        num_images = len(self.metadata)
+        print(f"Pre-loading {num_images} images into memory...")
+        for idx in range(num_images):
+            img_path = os.path.join(
+                self.root_dir, self.metadata.iloc[idx][self.img_filename_col]
+            )
+            try:
+                img = Image.open(img_path)
+                rgb_img = img.convert("RGB")
+                rgb_img.load()
+                self._image_cache[idx] = rgb_img
+                img.close()
+            except FileNotFoundError:
+                print(f"Warning: Image not found at {img_path}")
+                self._image_cache[idx] = Image.new("RGB", (256, 256), color="black")
+            if (idx + 1) % 1000 == 0:
+                print(f"  Loaded {idx + 1} / {num_images}")
+        print(f"Cache complete: {len(self._image_cache)} images")
 
     def __len__(self):
         return len(self.metadata)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        img_path = os.path.join(self.root_dir, self.metadata.iloc[idx][self.img_filename_col])
-
-        try:
-            image = Image.open(img_path).convert('RGB')
-        except FileNotFoundError:
-            print(f"Error: Image not found at {img_path}")
-            image = Image.new('RGB', (256, 256), color='black')
-
         label = int(self.metadata.iloc[idx][self.label_col])
+
+        # Load from RAM cache (PIL)
+        if self._image_cache is not None and idx in self._image_cache:
+            image = self._image_cache[idx]
+        else:
+            # Load from disk (PIL)
+            img_path = os.path.join(
+                self.root_dir, self.metadata.iloc[idx][self.img_filename_col]
+            )
+            try:
+                with Image.open(img_path) as img:
+                    image = img.convert("RGB")
+            except FileNotFoundError:
+                print(f"Error: Image not found at {img_path}")
+                image = Image.new("RGB", (256, 256), color="black")
 
         if self.transform:
             image = self.transform(image)
@@ -82,10 +119,14 @@ def extract_labels_from_dataset(dataset: Any) -> torch.Tensor:
     Returns:
         Tensor containing all labels from the dataset.
     """
-    if hasattr(dataset, 'metadata') and 'y' in dataset.metadata.columns:
-        return torch.tensor(dataset.metadata['y'].values, dtype=torch.long)
-    elif hasattr(dataset, 'labels'):
-        return torch.tensor(dataset.labels, dtype=torch.long) if not isinstance(dataset.labels, torch.Tensor) else dataset.labels
+    if hasattr(dataset, "metadata") and "y" in dataset.metadata.columns:
+        return torch.tensor(dataset.metadata["y"].values, dtype=torch.long)
+    elif hasattr(dataset, "labels"):
+        return (
+            torch.tensor(dataset.labels, dtype=torch.long)
+            if not isinstance(dataset.labels, torch.Tensor)
+            else dataset.labels
+        )
     else:
         labels = []
         for i in range(len(dataset)):

@@ -11,11 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from sklearn.mixture import GaussianMixture
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
 
 from ..data.datasets import IterativeDataset, extract_labels_from_dataset
-from ..data.loaders import create_data_loader
+from ..data.loaders import create_data_loader, create_node_balanced_sampler
 from ..evaluation.analysis import analyze_hierarchical_nodes
 from ..evaluation.metrics import (
     calculate_basic_metrics,
@@ -208,8 +209,13 @@ class NCTClassifier:
                     class_0_nodes.append(node_id)
                 else:
                     class_1_nodes.append(node_id)
-            class_0_prob = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-            class_1_prob = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+            # class_0_prob = hierarchical_probs[:, class_0_nodes].sum(dim=1)
+            # class_1_prob = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+            class_0_raw = hierarchical_probs[:, class_0_nodes].sum(dim=1)
+            class_1_raw = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+            total = class_0_raw + class_1_raw
+            class_0_prob = class_0_raw / total
+            class_1_prob = class_1_raw / total
         elif self.config.hierarchical_architecture == "correct_label_routing":
             class_0_nodes = []
             class_1_nodes = []
@@ -221,36 +227,58 @@ class NCTClassifier:
                     class_0_nodes.append(node_id)
                 else:
                     class_1_nodes.append(node_id)
-            class_0_prob = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-            class_1_prob = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+            # class_0_prob = hierarchical_probs[:, class_0_nodes].sum(dim=1)
+            # class_1_prob = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+            class_0_raw = hierarchical_probs[:, class_0_nodes].sum(dim=1)
+            class_1_raw = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+            total = class_0_raw + class_1_raw
+            class_0_prob = class_0_raw / total
+            class_1_prob = class_1_raw / total
         else:  # "none"
             mid_point = final_num_nodes // 2
-            class_0_prob = hierarchical_probs[:, :mid_point].sum(dim=1)
-            class_1_prob = hierarchical_probs[:, mid_point:].sum(dim=1)
+            class_0_raw = hierarchical_probs[:, :mid_point].sum(dim=1)
+            class_1_raw = hierarchical_probs[:, mid_point:].sum(dim=1)
+            total = class_0_raw + class_1_raw
+            class_0_prob = class_0_raw / total
+            class_1_prob = class_1_raw / total
         return torch.stack([class_0_prob, class_1_prob], dim=1).numpy()
 
     # ============================================================================
     # DATA UTILITIES - DataLoader Creation
     # ============================================================================
 
-    def _create_iterative_loader(self, dataset: Any, is_training: bool) -> DataLoader:
+    def _create_iterative_loader(
+        self, dataset: Any, is_training: bool, use_node_balanced: bool = False
+    ) -> DataLoader:
         """
         Create a DataLoader for iterative dataset.
         Args:
             dataset: Input dataset (IterativeDataset).
             is_training: Whether this is for training or evaluation.
+            use_node_balanced: If True, use node-balanced sampling (DFR-style).
         Returns:
             DataLoader configured for iterative training/evaluation.
         """
         if is_training:
-            return create_data_loader(
-                dataset,
-                is_training=True,
-                batch_size=self.config.batch_size,
-                num_workers=self.config.num_workers,
-                pin_memory=self.config.pin_memory,
-                generator=self.generator,
-            )
+            if use_node_balanced:
+                # DFR-style: balance across nodes, not just classes
+                sampler = create_node_balanced_sampler(dataset.hier_labels)
+                return DataLoader(
+                    dataset,
+                    batch_size=self.config.batch_size,
+                    sampler=sampler,
+                    num_workers=self.config.num_workers,
+                    pin_memory=self.config.pin_memory,
+                )
+            else:
+                return create_data_loader(
+                    dataset,
+                    is_training=True,
+                    batch_size=self.config.batch_size,
+                    num_workers=self.config.num_workers,
+                    pin_memory=self.config.pin_memory,
+                    generator=self.generator,
+                )
         else:
             return create_data_loader(
                 dataset,
@@ -260,6 +288,34 @@ class NCTClassifier:
                 pin_memory=self.config.pin_memory,
                 seed=self.config.seed,
             )
+
+    # def _create_iterative_loader(self, dataset: Any, is_training: bool) -> DataLoader:
+    #     """
+    #     Create a DataLoader for iterative dataset.
+    #     Args:
+    #         dataset: Input dataset (IterativeDataset).
+    #         is_training: Whether this is for training or evaluation.
+    #     Returns:
+    #         DataLoader configured for iterative training/evaluation.
+    #     """
+    #     if is_training:
+    #         return create_data_loader(
+    #             dataset,
+    #             is_training=True,
+    #             batch_size=self.config.batch_size,
+    #             num_workers=self.config.num_workers,
+    #             pin_memory=self.config.pin_memory,
+    #             generator=self.generator,
+    #         )
+    #     else:
+    #         return create_data_loader(
+    #             dataset,
+    #             is_training=False,
+    #             batch_size=self.config.batch_size,
+    #             num_workers=self.config.num_workers,
+    #             pin_memory=self.config.pin_memory,
+    #             seed=self.config.seed,
+    #         )
 
     def evaluate(
         self,
@@ -295,13 +351,17 @@ class NCTClassifier:
             group_names = self._group_names
 
         binary_predictions = self.predict(X_test)
+        binary_probabilities = self.predict_proba(X_test)
         test_loader = self._create_iterative_loader(X_test, is_training=False)
         hierarchical_predictions = self._get_hierarchical_predictions(test_loader)
 
-        # Calculate basic metrics
+        # Calculate basic metrics (with AUROC using probability of positive class)
         y_test = extract_labels_from_dataset(X_test)
         y_test_np = y_test.numpy()
-        basic_metrics = calculate_basic_metrics(y_test_np, binary_predictions)
+        y_prob_positive = binary_probabilities[:, 1]  # Probability of class 1
+        basic_metrics = calculate_basic_metrics(
+            y_test_np, binary_predictions, y_prob=y_prob_positive
+        )
         results = {"basic_metrics": basic_metrics}
 
         # # Calculate pseudo label metrics (ISSUE- labels are always for test set while we can pass any dataset)
@@ -315,7 +375,11 @@ class NCTClassifier:
         if group_labels is not None:
             group_labels_np = np.array(group_labels)
             group_metrics = calculate_group_metrics(
-                y_test_np, binary_predictions, group_labels_np, group_names
+                y_test_np,
+                binary_predictions,
+                group_labels_np,
+                y_prob_positive,
+                group_names,
             )
             results["group_metrics"] = group_metrics
 
@@ -544,12 +608,26 @@ class NCTClassifier:
             trainer.iteration_num = i + 1
 
             # Compute class weights for imbalanced data
-            if self.config.use_class_weights:
+            # Skip class weights when using node-balanced sampling (they're redundant)
+            if self.config.use_class_weights and not (
+                i > 0 and self.config.node_balanced_sampling
+            ):
                 class_weights, class_counts = compute_class_weights(
-                    current_train_labels, num_nodes, return_counts=True
+                    current_train_labels,
+                    num_nodes,
+                    return_counts=True,
+                    max_weight=self.config.max_class_weight,
                 )
             else:
                 class_weights, class_counts = None, None
+
+            # # Compute class weights for imbalanced data
+            # if self.config.use_class_weights:
+            #     class_weights, class_counts = compute_class_weights(
+            #         current_train_labels, num_nodes, return_counts=True
+            #     )
+            # else:
+            #     class_weights, class_counts = None, None
 
             self.logger.iteration_start(
                 i + 1,
@@ -581,9 +659,19 @@ class NCTClassifier:
             )
             val_iter_dataset = IterativeDataset(base_val_dataset, current_val_labels)
 
-            train_iter_loader = self._create_iterative_loader(
-                train_iter_dataset, is_training=True
+            use_node_balanced = (
+                i > 0  # Only from iteration 2+
+                and self.config.node_balanced_sampling
             )
+            train_iter_loader = self._create_iterative_loader(
+                train_iter_dataset,
+                is_training=True,
+                use_node_balanced=use_node_balanced,
+            )
+
+            # train_iter_loader = self._create_iterative_loader(
+            #     train_iter_dataset, is_training=True
+            # )
             val_iter_loader = self._create_iterative_loader(
                 val_iter_dataset, is_training=False
             )
@@ -698,16 +786,11 @@ class NCTClassifier:
             model, base_val_dataset, val_labels, is_correct_val
         )
 
-        # Log routing statistics for confidence-based routing
-        if (
-            self.config.hierarchical_architecture == "none"
-            and self.config.routing_strategy == "confidence"
-        ):
+        # Log routing statistics for correctness_certainty routing
+        if self.config.routing_strategy == "correctness_certainty":
             routing_stats = {
                 "num_wrong": (~is_correct_train).sum().item(),
-                "num_low_confidence": (is_correct_train & is_difficult_train)
-                .sum()
-                .item(),
+                "num_uncertain": (is_correct_train & is_difficult_train).sum().item(),
                 "num_difficult": is_difficult_train.sum().item(),
                 "total": len(train_labels),
             }
@@ -784,39 +867,20 @@ class NCTClassifier:
         is_correct: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Determine which samples should be routed to "difficult" child nodes for a single dataset.
-
-        Routing strategy depends on architecture mode:
-        - prediction_routing: Always route by correctness only
-        - correct_label_routing: Always route by correctness only
-        - none: Can use correctness + confidence threshold
-
-        Args:
-            model: Current trained model
-            base_dataset: Base dataset
-            labels: Current labels
-            is_correct: Boolean tensor of correct predictions
-
-        Returns:
-            Boolean tensor indicating difficult samples
+        Determine which samples should be routed to "difficult" child nodes.
+        Strategies:
+        - correctness: Simply ~is_correct
+        - correctness_certainty: ~is_correct OR (is_correct & uncertain)
         """
-        # Hierarchical modes: always use correctness-based routing
-        if self.config.hierarchical_architecture in [
-            "prediction_routing",
-            "correct_label_routing",
-        ]:
-            return ~is_correct
+        strategy = self.config.routing_strategy
 
-        # Simple mode ("none") with confidence-based routing
-        if self.config.routing_strategy == "confidence":
-            return self._apply_confidence_routing(
-                model, base_dataset, labels, is_correct
-            )
+        if strategy == "correctness_certainty":
+            return self._apply_entropy_routing(model, base_dataset, labels, is_correct)
 
-        # Simple mode with standard correctness routing
+        # Default / Fallback to 'correctness'
         return ~is_correct
 
-    def _apply_confidence_routing(
+    def _apply_entropy_routing(
         self,
         model: nn.Module,
         base_dataset: Any,
@@ -824,24 +888,70 @@ class NCTClassifier:
         is_correct: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Apply confidence-based routing for a single dataset: route samples that are wrong OR have low confidence.
-
-        Args:
-            model: Current trained model
-            base_dataset: Base dataset
-            labels: Current labels
-            is_correct: Boolean tensor of correct predictions
-
-        Returns:
-            Boolean tensor indicating difficult samples
+        Apply 'correctness_certainty' routing logic:
+        - Wrong samples → Always Hard (Baseline)
+        - Correct samples → Hard if in high-entropy GMM cluster (Uncertain)
         """
         eval_dataset = IterativeDataset(base_dataset, labels)
         eval_loader = self._create_iterative_loader(eval_dataset, is_training=False)
 
-        probs = self._get_hierarchical_probabilities(eval_loader, model=model)
-        conf = torch.max(probs, dim=1).values
+        # Get model outputs
+        model.eval()
+        all_outputs = []
+        with torch.no_grad():
+            for images, _ in eval_loader:
+                images = images.to(self.device)
+                outputs = model(images)
+                all_outputs.append(outputs.cpu())
+        outputs = torch.cat(all_outputs)
 
-        is_difficult = (~is_correct) | (conf < self.config.confidence_threshold)
+        # Compute entropy using sigmoid (matches BCE training)
+        probs = torch.sigmoid(outputs)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=1)
+
+        # 1. Baseline: Wrong samples are always hard
+        is_incorrect = ~is_correct
+
+        # 2. Analyze Correct samples for uncertainty
+        correctly_predicted_mask = is_correct
+        is_correct_but_uncertain = torch.zeros_like(is_correct, dtype=torch.bool)
+
+        # Perform GMM clustering if enough correct samples
+        num_correct = correctly_predicted_mask.sum().item()
+        if num_correct > 10:
+            entropy_of_correct = (
+                entropy[correctly_predicted_mask].numpy().reshape(-1, 1)
+            )
+
+            # Fit 1 and 2 cluster models
+            single_cluster = GaussianMixture(n_components=1, random_state=42).fit(
+                entropy_of_correct
+            )
+            two_clusters = GaussianMixture(n_components=2, random_state=42).fit(
+                entropy_of_correct
+            )
+
+            # Check if 2 clusters fit better (lower BIC)
+            two_clusters_exist = two_clusters.bic(
+                entropy_of_correct
+            ) < single_cluster.bic(entropy_of_correct)
+
+            if two_clusters_exist:
+                cluster_assignments = two_clusters.predict(entropy_of_correct)
+
+                # Higher mean = higher entropy = uncertain cluster
+                uncertain_cluster_id = (
+                    1 if two_clusters.means_[1] > two_clusters.means_[0] else 0
+                )
+
+                # Mark correct samples in uncertain cluster as hard
+                correct_base_indices = torch.where(correctly_predicted_mask)[0]
+                for i, idx in enumerate(correct_base_indices):
+                    if cluster_assignments[i] == uncertain_cluster_id:
+                        is_correct_but_uncertain[idx] = True
+
+        # Final: Hard = Incorrect OR (Correct but Uncertain)
+        is_difficult = is_incorrect | is_correct_but_uncertain
 
         return is_difficult
 
@@ -896,10 +1006,60 @@ class NCTClassifier:
             for images, _ in dataloader:
                 images = images.to(self.device)
                 outputs = model(images)
-                probabilities = torch.softmax(outputs, dim=1)
+                probabilities = torch.sigmoid(outputs)
+                # probabilities = torch.softmax(outputs, dim=1)
                 all_probabilities.append(probabilities.cpu())
 
         return torch.cat(all_probabilities)
+
+    def _get_binary_probabilities(
+        self,
+        dataloader: DataLoader,
+        iteration: int,
+        model: Optional[nn.Module] = None,
+    ) -> np.ndarray:
+        """
+        Get binary class probabilities from hierarchical model.
+
+        Args:
+            dataloader: DataLoader to generate probabilities for.
+            iteration: Current iteration number (determines number of nodes).
+            model: Model to use. If None, uses self.model.
+
+        Returns:
+            Binary class probabilities as numpy array of shape (n_samples, 2).
+        """
+        hierarchical_probs = self._get_hierarchical_probabilities(dataloader, model)
+        final_num_nodes = 2**iteration
+
+        if self.config.hierarchical_architecture == "prediction_routing":
+            class_0_nodes = []
+            class_1_nodes = []
+            for node_id in range(final_num_nodes):
+                if get_node_class(node_id, iteration) == 0:
+                    class_0_nodes.append(node_id)
+                else:
+                    class_1_nodes.append(node_id)
+        elif self.config.hierarchical_architecture == "correct_label_routing":
+            class_0_nodes = []
+            class_1_nodes = []
+            for node_id in range(final_num_nodes):
+                if get_node_class_correct_label(node_id, iteration) == 0:
+                    class_0_nodes.append(node_id)
+                else:
+                    class_1_nodes.append(node_id)
+        else:  # "none"
+            mid_point = final_num_nodes // 2
+            class_0_nodes = list(range(mid_point))
+            class_1_nodes = list(range(mid_point, final_num_nodes))
+
+        class_0_raw = hierarchical_probs[:, class_0_nodes].sum(dim=1)
+        class_1_raw = hierarchical_probs[:, class_1_nodes].sum(dim=1)
+        total = class_0_raw + class_1_raw
+        class_0_prob = class_0_raw / total
+        class_1_prob = class_1_raw / total
+
+        return torch.stack([class_0_prob, class_1_prob], dim=1).numpy()
 
     # ============================================================================
     # EVALUATION - Per-Iteration Evaluation
@@ -932,10 +1092,13 @@ class NCTClassifier:
         if self.config.verbose == 0:
             return
 
-        # Get test predictions
+        # Get test predictions and probabilities
         test_loader = self._create_iterative_loader(X_test, is_training=False)
         hierarchical_predictions = self._get_hierarchical_predictions(
             test_loader, model=model
+        )
+        binary_probabilities = self._get_binary_probabilities(
+            test_loader, iteration, model=model
         )
         y_test = extract_labels_from_dataset(X_test)
 
@@ -955,6 +1118,7 @@ class NCTClassifier:
         # Convert to numpy
         y_test_np = y_test.cpu().numpy()
         binary_predictions_np = binary_predictions.cpu().numpy()
+        binary_prob_positive = binary_probabilities[:, 1]  # Probability of class 1
         hierarchical_predictions_np = hierarchical_predictions.cpu().numpy()
         group_labels_np = np.array(group_labels) if group_labels is not None else None
 
@@ -1022,17 +1186,23 @@ class NCTClassifier:
         ):
             prev_pseudo_labels = self._iteration_results[-2]["test_pseudo_labels"]
             curr_routing = self._iteration_results[-1]["hierarchical_predictions"]
-            num_expected_classes = 2 ** iteration
+            num_expected_classes = 2**iteration
             pseudo_metrics = compute_pseudo_label_metrics(
                 prev_pseudo_labels, curr_routing, num_expected_classes
             )
 
-        # Compute test metrics
-        basic_metrics = calculate_basic_metrics(y_test_np, binary_predictions_np)
+        # Compute test metrics (with AUROC using probability of positive class)
+        basic_metrics = calculate_basic_metrics(
+            y_test_np, binary_predictions_np, y_prob=binary_prob_positive
+        )
         group_results = None
         if group_labels_np is not None:
             group_results = calculate_group_metrics(
-                y_test_np, binary_predictions_np, group_labels_np, group_names
+                y_test_np,
+                binary_predictions_np,
+                group_labels_np,
+                binary_prob_positive,
+                group_names,
             )
         node_metrics = calculate_hierarchical_metrics(
             hierarchical_predictions_np, iteration, y_test_np, binary_predictions_np
@@ -1115,9 +1285,11 @@ class NCTClassifier:
                 "val_pseudo_labels"
             )
             if prev_val_pseudo_labels is not None:
-                num_expected_classes = 2 ** iteration
+                num_expected_classes = 2**iteration
                 val_pseudo_metrics = compute_pseudo_label_metrics(
-                    prev_val_pseudo_labels, val_hierarchical_preds.cpu().numpy(), num_expected_classes
+                    prev_val_pseudo_labels,
+                    val_hierarchical_preds.cpu().numpy(),
+                    num_expected_classes,
                 )
                 self._iteration_results[-1]["val_pseudo_metrics"] = val_pseudo_metrics
 

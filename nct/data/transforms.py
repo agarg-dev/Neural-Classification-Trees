@@ -9,17 +9,29 @@ def create_transforms(config: DatasetConfig, is_training: bool = True):
     """Create image transforms based on dataset configuration."""
 
     if is_training:
-        return transforms.Compose([
+        transform_list = [
             transforms.RandomResizedCrop(
                 config.train_crop_size,
                 scale=config.train_scale,
                 ratio=config.train_ratio,
-                interpolation=2
+                interpolation=2,
             ),
             transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        ]
+
+        if config.use_vertical_flip:
+            transform_list.append(transforms.RandomVerticalFlip())
+
+        transform_list.extend(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=config.normalize_mean, std=config.normalize_std
+                ),
+            ]
+        )
+
+        return transforms.Compose(transform_list)
     else:
         transform_list = []
 
@@ -27,14 +39,22 @@ def create_transforms(config: DatasetConfig, is_training: bool = True):
             transform_list.append(transforms.CenterCrop(config.eval_centercrop_first))
             transform_list.append(transforms.Resize(config.target_resolution))
         elif config.eval_resize is not None:
-            transform_list.append(transforms.Resize((config.eval_resize, config.eval_resize)))
-            transform_list.append(transforms.CenterCrop((config.eval_centercrop, config.eval_centercrop)))
+            transform_list.append(
+                transforms.Resize((config.eval_resize, config.eval_resize))
+            )
+            transform_list.append(
+                transforms.CenterCrop((config.eval_centercrop, config.eval_centercrop))
+            )
         else:
             transform_list.append(transforms.Resize(config.target_resolution))
 
-        transform_list.extend([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        transform_list.extend(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=config.normalize_mean, std=config.normalize_std
+                ),
+            ]
+        )
 
         return transforms.Compose(transform_list)

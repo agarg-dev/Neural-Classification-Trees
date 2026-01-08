@@ -1,20 +1,23 @@
 """Evaluation metrics for hierarchical classification."""
 
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
     precision_score,
     recall_score,
-    f1_score,
-    confusion_matrix,
-    classification_report,
+    roc_auc_score,
 )
-from typing import Any, Dict, List, Optional, Tuple
 
 
 def calculate_basic_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
+    y_prob: Optional[np.ndarray] = None,
     average: str = "binary",
 ) -> Dict[str, float]:
     """
@@ -23,10 +26,12 @@ def calculate_basic_metrics(
     Args:
         y_true: True labels (numpy array)
         y_pred: Predicted labels (numpy array)
+        y_prob: Predicted probabilities for positive class (numpy array, optional).
+                Required for AUROC computation.
         average: Averaging strategy for multi-class metrics
 
     Returns:
-        Dict[str, float]: Dictionary of metrics
+        Dict[str, float]: Dictionary of metrics including AUROC if y_prob provided
     """
 
     # Auto-detect if multiclass and adjust averaging
@@ -46,6 +51,21 @@ def calculate_basic_metrics(
         "f1_score": f1_score(y_true, y_pred, average=average, zero_division=0),
     }
 
+    # Calculate AUROC if probabilities are provided
+    if y_prob is not None:
+        try:
+            if num_classes == 2:
+                # Binary classification: use probability of positive class
+                metrics["auroc"] = roc_auc_score(y_true, y_prob)
+            else:
+                # Multi-class: use one-vs-rest with weighted averaging
+                metrics["auroc"] = roc_auc_score(
+                    y_true, y_prob, multi_class="ovr", average="weighted"
+                )
+        except ValueError:
+            # AUROC undefined if only one class present in y_true
+            metrics["auroc"] = float("nan")
+
     return metrics
 
 
@@ -53,6 +73,7 @@ def calculate_group_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     group_labels: np.ndarray,
+    y_prob: Optional[np.ndarray] = None,
     group_names: Optional[Dict[int, str]] = None,
 ) -> Dict[str, Any]:
     """
@@ -62,14 +83,17 @@ def calculate_group_metrics(
         y_true: True binary labels (numpy array)
         y_pred: Predicted binary labels (numpy array)
         group_labels: Group/subpopulation labels (numpy array)
+        y_prob: Predicted probabilities for positive class (numpy array, optional).
+                Required for per-group AUROC computation.
         group_names: Optional mapping from group IDs to names
 
     Returns:
-        Dict[str, Any]: Group-specific metrics
+        Dict[str, Any]: Group-specific metrics including per-group AUROC if y_prob provided
     """
 
     group_metrics = {}
     group_accuracies = []
+    group_aurocs = []
 
     unique_groups = np.unique(group_labels)
 
@@ -101,6 +125,21 @@ def calculate_group_metrics(
             "group_id": int(group_id),
         }
 
+        # Calculate per-group AUROC if probabilities provided
+        if y_prob is not None:
+            group_prob = y_prob[group_mask]
+            # AUROC requires both classes present in the group
+            if len(np.unique(group_true)) > 1:
+                try:
+                    auroc = roc_auc_score(group_true, group_prob)
+                    group_metrics[group_name]["auroc"] = auroc
+                    group_aurocs.append(auroc)
+                except ValueError:
+                    group_metrics[group_name]["auroc"] = float("nan")
+            else:
+                # Only one class in group - AUROC undefined
+                group_metrics[group_name]["auroc"] = float("nan")
+
     # Calculate worst-group accuracy
     worst_group_accuracy = min(group_accuracies) if group_accuracies else 0.0
 
@@ -111,6 +150,12 @@ def calculate_group_metrics(
         "mean_group_accuracy": np.mean(group_accuracies) if group_accuracies else 0.0,
         "group_accuracy_std": np.std(group_accuracies) if group_accuracies else 0.0,
     }
+
+    # Add AUROC summary if available
+    if group_aurocs:
+        summary["worst_group_auroc"] = min(group_aurocs)
+        summary["best_group_auroc"] = max(group_aurocs)
+        summary["mean_group_auroc"] = float(np.mean(group_aurocs))
 
     return {"group_metrics": group_metrics, "summary": summary}
 
@@ -283,20 +328,19 @@ def compute_pseudo_label_metrics(
     accuracy = accuracy_score(true_pseudo_labels, predicted_pseudo_labels)
 
     # Multi-class F1 (macro average)
-    f1 = f1_score(true_pseudo_labels, predicted_pseudo_labels, average='macro')
+    f1 = f1_score(true_pseudo_labels, predicted_pseudo_labels, average="macro")
 
     # Per-class accuracy for ALL expected classes
     group_accs_all = {}
     group_accs_filled = {}
 
     for gid in range(num_expected_classes):
-        mask = (true_pseudo_labels == gid)
+        mask = true_pseudo_labels == gid
         if np.sum(mask) > 0:
             # Class exists in training data
-            acc = float(accuracy_score(
-                true_pseudo_labels[mask],
-                predicted_pseudo_labels[mask]
-            ))
+            acc = float(
+                accuracy_score(true_pseudo_labels[mask], predicted_pseudo_labels[mask])
+            )
             group_accs_all[int(gid)] = acc
             group_accs_filled[int(gid)] = acc
         else:
@@ -306,8 +350,12 @@ def compute_pseudo_label_metrics(
     return {
         "accuracy": float(accuracy),
         "f1_score": float(f1),
-        "worst_group_accuracy": float(min(group_accs_all.values())) if group_accs_all else 0.0,
-        "worst_group_accuracy_filled": float(min(group_accs_filled.values())) if group_accs_filled else 0.0,
+        "worst_group_accuracy": float(min(group_accs_all.values()))
+        if group_accs_all
+        else 0.0,
+        "worst_group_accuracy_filled": float(min(group_accs_filled.values()))
+        if group_accs_filled
+        else 0.0,
         "group_accuracies": group_accs_all,
         "num_filled_classes": len(group_accs_filled),
         "num_expected_classes": num_expected_classes,
@@ -357,5 +405,7 @@ def print_evaluation_report(
         print(f"  Mean group accuracy:  {summary['mean_group_accuracy']:.3f}")
 
     # Hierarchical metrics - minimal
-    if 'node_utilization' in metrics:
-        print(f"  Node utilization:     {metrics['node_utilization']:.3f} ({metrics['used_nodes']}/{metrics['total_nodes']} nodes)")
+    if "node_utilization" in metrics:
+        print(
+            f"  Node utilization:     {metrics['node_utilization']:.3f} ({metrics['used_nodes']}/{metrics['total_nodes']} nodes)"
+        )

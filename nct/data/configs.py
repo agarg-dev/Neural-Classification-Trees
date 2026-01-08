@@ -1,7 +1,15 @@
 """Dataset configurations for spurious correlation benchmarks."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
+
+# Default normalization (ImageNet)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+# ISIC-specific normalization (from George paper)
+ISIC_MEAN = (0.71826, 0.56291, 0.52548)
+ISIC_STD = (0.16318, 0.14502, 0.17271)
 
 
 @dataclass
@@ -17,6 +25,7 @@ class DatasetConfig:
     train_crop_size: int = 224
     train_scale: Tuple[float, float] = (0.7, 1.0)
     train_ratio: Tuple[float, float] = (0.75, 1.333)
+    use_vertical_flip: bool = False
 
     # Evaluation preprocessing parameters
     eval_resize: Optional[int] = None
@@ -25,6 +34,10 @@ class DatasetConfig:
 
     # Group labels for evaluation
     group_names: Optional[Dict[int, str]] = None
+
+    # Normalization parameters
+    normalize_mean: Tuple[float, float, float] = IMAGENET_MEAN
+    normalize_std: Tuple[float, float, float] = IMAGENET_STD
 
 
 WATERBIRD_CONFIG = DatasetConfig(
@@ -59,7 +72,27 @@ CELEBA_CONFIG = DatasetConfig(
 )
 
 
+ISIC_CONFIG = DatasetConfig(
+    name="isic",
+    data_subdir="isic",
+    class_names=("Benign", "Malignant"),
+    train_ratio=(0.75, 1.333),
+    use_vertical_flip=True,
+    eval_resize=256,
+    eval_centercrop=224,
+    group_names={
+        0: "Benign No Patch (Difficult)",
+        1: "Benign With Patch (Easy)",
+        2: "Malignant No Patch (Easy)",
+        3: "Malignant With Patch (N/A)",  # No malignant samples have patches
+    },
+    normalize_mean=ISIC_MEAN,
+    normalize_std=ISIC_STD,
+)
+
+
 DATASET_REGISTRY = {
     "waterbird": WATERBIRD_CONFIG,
     "celeba": CELEBA_CONFIG,
+    "isic": ISIC_CONFIG,
 }
