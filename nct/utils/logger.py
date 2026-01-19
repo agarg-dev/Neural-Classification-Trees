@@ -1,5 +1,6 @@
 """Logging utilities for NCT training."""
 
+import math
 import time
 from typing import Any, Dict, Optional
 
@@ -60,13 +61,7 @@ class NCTLogger:
 
             # Log architecture mode
             arch_mode = config.get("hierarchical_architecture", "none")
-            if arch_mode == "prediction_routing":
-                print("Architecture: Hierarchical (prediction-based routing)")
-                if config.get("routing_strategy") == "correctness_certainty":
-                    print(
-                        "  Note: Using correctness+certainty routing (GMM-based uncertainty detection)"
-                    )
-            elif arch_mode == "correct_label_routing":
+            if arch_mode == "correct_label_routing":
                 print("Architecture: Hierarchical (correct label routing)")
             else:  # "none"
                 print("Architecture: Simple (position-based split)")
@@ -100,7 +95,7 @@ class NCTLogger:
             )
 
             # Print hierarchical architecture info
-            if self.config.hierarchical_architecture == "prediction_routing":
+            if self.config.hierarchical_architecture == "correct_label_routing":
                 if iteration > 1:
                     num_parent_layers = iteration - 1
                     print(
@@ -116,6 +111,10 @@ class NCTLogger:
             if class_weights is not None:
                 weights_array = self._to_numpy(class_weights)
                 print(f"  Class Weights: {np.round(weights_array, 2)}")
+            elif self.config.use_class_weights:
+                # Class weights enabled but not applied - explain why
+                if iteration == 1 and self.config.skip_class_weights_iter1:
+                    print(f"  Class Weights: Skipped for iteration 1 (skip_class_weights_iter1=True)")
 
     def phase_start(self, phase_name: str, phase_num: int, epochs: int):
         """Print phase start message."""
@@ -141,6 +140,8 @@ class NCTLogger:
         train_aux_loss: float = 0.0,
         val_aux_loss: float = 0.0,
         worst_group_acc: float = 0.0,
+        difficult_node_acc: float = 0.0,
+        difficult_node_f1: float = 0.0,
     ):
         """Print epoch update (only for verbose=2)."""
         if self.verbose >= 2:
@@ -151,9 +152,15 @@ class NCTLogger:
                 )
             wga_info = ""
             if worst_group_acc > 0:
-                wga_info = f", Worst-Group Acc: {worst_group_acc:.3f}"
+                wga_info = f", WGA: {worst_group_acc:.3f}"
+            dna_info = ""
+            if difficult_node_acc > 0:
+                dna_info = f", DNA: {difficult_node_acc:.3f}"
+            dnf1_info = ""
+            if difficult_node_f1 > 0:
+                dnf1_info = f", DNF1: {difficult_node_f1:.3f}"
             print(
-                f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}{aux_info}{wga_info}"
+                f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}{aux_info}{wga_info}{dna_info}{dnf1_info}"
             )
 
     def early_stop(self, phase_name: str, phase_num: int):
@@ -260,8 +267,10 @@ class NCTLogger:
         group_accuracies: Optional[Dict[int, float]] = None,
         train_aux_loss: float = 0.0,
         val_aux_loss: float = 0.0,
+        difficult_node_acc: float = 0.0,
+        difficult_node_f1: float = 0.0,
     ):
-        """Log per-epoch metrics including auxiliary loss."""
+        """Log per-epoch metrics including auxiliary loss, DNA, and DNF1."""
         if self.wandb_logger:
             self.wandb_logger.log_epoch_metrics(
                 iteration,
@@ -278,6 +287,8 @@ class NCTLogger:
                 head_lr,
                 train_aux_loss,
                 val_aux_loss,
+                difficult_node_acc,
+                difficult_node_f1,
             )
 
     def log_iteration_summary(
@@ -385,11 +396,12 @@ class NCTLogger:
         self.log(f"Test Precision: {test_metrics['precision']:.4f}", level=1)
         self.log(f"Test Recall: {test_metrics['recall']:.4f}", level=1)
         self.log(f"Test F1 Score: {test_metrics['f1_score']:.4f}", level=1)
-        if "auroc" in test_metrics:
-            import math
-
-            if not math.isnan(test_metrics["auroc"]):
-                self.log(f"Test AUROC: {test_metrics['auroc']:.4f}", level=1)
+        if "auroc" in test_metrics and not math.isnan(test_metrics["auroc"]):
+            self.log(f"Test AUROC: {test_metrics['auroc']:.4f}", level=1)
+        if "non_patch_auroc" in test_metrics and not math.isnan(test_metrics["non_patch_auroc"]):
+            self.log(f"Non-Patch AUROC: {test_metrics['non_patch_auroc']:.4f}", level=1)
+        if "histopath_auroc" in test_metrics and not math.isnan(test_metrics["histopath_auroc"]):
+            self.log(f"Histopath AUROC: {test_metrics['histopath_auroc']:.4f}", level=1)
 
         # Print pseudo label metrics if available
         if pseudo_metrics:
@@ -405,10 +417,26 @@ class NCTLogger:
                 f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}",
                 level=1,
             )
+            if "difficult_node_accuracy" in pseudo_metrics:
+                self.log(
+                    f"Difficult Node Accuracy (DNA): {pseudo_metrics['difficult_node_accuracy']:.2%}",
+                    level=1,
+                )
+            if "difficult_node_f1" in pseudo_metrics:
+                self.log(
+                    f"Difficult Node F1 (DNF1): {pseudo_metrics['difficult_node_f1']:.4f}",
+                    level=1,
+                )
             self.log(
                 f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}",
                 level=1,
             )
+            # Log node sizes if available
+            if "node_sizes" in pseudo_metrics:
+                sizes_str = ", ".join(
+                    f"N{k}:{v}" for k, v in sorted(pseudo_metrics["node_sizes"].items())
+                )
+                self.log(f"Node Sizes: {sizes_str}", level=2)
 
         # Print group-specific performance
         if group_results is not None:

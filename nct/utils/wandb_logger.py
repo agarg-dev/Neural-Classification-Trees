@@ -1,5 +1,6 @@
 """Weights & Biases logging utilities for NCT training."""
 
+import math
 import os
 import time
 from typing import Any, Dict, Optional
@@ -63,8 +64,10 @@ class WandbLogger:
         head_lr: float,
         train_aux_loss: float = 0.0,
         val_aux_loss: float = 0.0,
+        difficult_node_acc: float = 0.0,
+        difficult_node_f1: float = 0.0,
     ):
-        """Log per-epoch metrics to wandb including auxiliary loss."""
+        """Log per-epoch metrics to wandb including auxiliary loss, DNA, and DNF1."""
         if not self.enabled or not self.run:
             return
 
@@ -74,6 +77,8 @@ class WandbLogger:
             f"iteration_{iteration}/phase_{phase}/val_accuracy": val_acc,
             f"iteration_{iteration}/phase_{phase}/val_f1": val_f1,
             f"iteration_{iteration}/phase_{phase}/worst_group_accuracy": worst_group_acc,
+            f"iteration_{iteration}/phase_{phase}/difficult_node_accuracy": difficult_node_acc,
+            f"iteration_{iteration}/phase_{phase}/difficult_node_f1": difficult_node_f1,
             f"iteration_{iteration}/phase_{phase}/base_lr": base_lr,
             f"iteration_{iteration}/phase_{phase}/head_lr": head_lr,
             "epoch": epoch,
@@ -126,6 +131,18 @@ class WandbLogger:
             "iteration": iteration,
         }
 
+        # Add subgroup AUROC metrics if available (e.g., ISIC dataset)
+        if "non_patch_auroc" in test_metrics and not math.isnan(test_metrics["non_patch_auroc"]):
+            metrics[f"iteration_{iteration}/non_patch_auroc"] = test_metrics["non_patch_auroc"]
+        if "histopath_auroc" in test_metrics and not math.isnan(test_metrics["histopath_auroc"]):
+            metrics[f"iteration_{iteration}/histopath_auroc"] = test_metrics["histopath_auroc"]
+
+        # Add pseudo-label metrics if available (iteration 2+)
+        if "pseudo_difficult_node_acc" in test_metrics:
+            metrics[f"iteration_{iteration}/pseudo_difficult_node_acc"] = test_metrics["pseudo_difficult_node_acc"]
+        if "pseudo_worst_group_acc" in test_metrics:
+            metrics[f"iteration_{iteration}/pseudo_worst_group_acc"] = test_metrics["pseudo_worst_group_acc"]
+
         # Add group metrics
         if group_metrics is not None and "summary" in group_metrics:
             summary = group_metrics["summary"]
@@ -164,8 +181,6 @@ class WandbLogger:
                     group_data.get("f1_score", 0)
                 )
                 if "auroc" in group_data:
-                    import math
-
                     auroc_val = group_data.get("auroc", float("nan"))
                     if not math.isnan(auroc_val):
                         metrics[

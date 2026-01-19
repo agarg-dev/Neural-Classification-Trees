@@ -44,6 +44,7 @@ class GenericImageDataset(Dataset):
         label_col: str = "y",
         transform: Optional[Callable] = None,
         cache_images_in_memory: bool = False,
+        num_channels: int = 3,
     ):
         self.metadata = metadata_df.reset_index(drop=True)
         self.root_dir = root_dir
@@ -51,6 +52,7 @@ class GenericImageDataset(Dataset):
         self.label_col = label_col
         self.transform = transform
         self.cache_images_in_memory = cache_images_in_memory
+        self.num_channels = num_channels
         self._image_cache = {} if cache_images_in_memory else None
 
         if cache_images_in_memory:
@@ -59,20 +61,21 @@ class GenericImageDataset(Dataset):
     def _preload_cache(self):
         """Pre-load all images into cache."""
         num_images = len(self.metadata)
-        print(f"Pre-loading {num_images} images into memory...")
+        mode = "L" if self.num_channels == 1 else "RGB"
+        print(f"Pre-loading {num_images} images into memory (mode={mode})...")
         for idx in range(num_images):
             img_path = os.path.join(
                 self.root_dir, self.metadata.iloc[idx][self.img_filename_col]
             )
             try:
                 img = Image.open(img_path)
-                rgb_img = img.convert("RGB")
-                rgb_img.load()
-                self._image_cache[idx] = rgb_img
+                converted_img = img.convert(mode)
+                converted_img.load()
+                self._image_cache[idx] = converted_img
                 img.close()
             except FileNotFoundError:
                 print(f"Warning: Image not found at {img_path}")
-                self._image_cache[idx] = Image.new("RGB", (256, 256), color="black")
+                self._image_cache[idx] = Image.new(mode, (256, 256), color="black" if mode == "RGB" else 0)
             if (idx + 1) % 1000 == 0:
                 print(f"  Loaded {idx + 1} / {num_images}")
         print(f"Cache complete: {len(self._image_cache)} images")
@@ -82,6 +85,7 @@ class GenericImageDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
         label = int(self.metadata.iloc[idx][self.label_col])
+        mode = "L" if self.num_channels == 1 else "RGB"
 
         # Load from RAM cache (PIL)
         if self._image_cache is not None and idx in self._image_cache:
@@ -93,10 +97,10 @@ class GenericImageDataset(Dataset):
             )
             try:
                 with Image.open(img_path) as img:
-                    image = img.convert("RGB")
+                    image = img.convert(mode)
             except FileNotFoundError:
                 print(f"Error: Image not found at {img_path}")
-                image = Image.new("RGB", (256, 256), color="black")
+                image = Image.new(mode, (256, 256), color="black" if mode == "RGB" else 0)
 
         if self.transform:
             image = self.transform(image)

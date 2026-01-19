@@ -3,34 +3,39 @@
 import torch
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
-from ..utils.hierarchical import get_node_class, get_node_class_correct_label
+from ..utils.hierarchical import (
+    get_num_nodes,
+    get_nodes_per_class,
+)
 
 # Export get_node_label for use in other modules
 __all__ = ['get_node_label', 'analyze_hierarchical_results']
 
 
 def get_node_label(
-    node_index: int, 
-    num_iterations: int, 
+    node_index: int,
+    num_iterations: int,
     class_names: Optional[List[str]] = None,
-    hierarchical: str = "none"
+    hierarchical: str = "none",
+    num_classes: int = 2
 ) -> str:
     """
     Generate a hierarchical label for a given node.
-    
+
     This is a general-purpose label generator used across evaluation, visualization,
-    and logging. Supports custom class names.
-    
+    and logging. Supports custom class names and multi-class.
+
     Args:
         node_index: Index of the final node
         num_iterations: Number of iterations in the hierarchy
         class_names: Optional list of class names (e.g., ['Landbird', 'Waterbird']).
                     If None, uses 'Class 0', 'Class 1', etc.
-        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
-    
+        hierarchical: Routing mode ('none' or 'correct_label_routing')
+        num_classes: Number of base classes (default 2 for binary)
+
     Returns:
         str: Human-readable hierarchical label with arrow separators
-        
+
     Examples:
         >>> get_node_label(3, 2, ['Landbird', 'Waterbird'])
         'Waterbird → Difficult'
@@ -42,15 +47,9 @@ def get_node_label(
     if num_iterations <= 0:
         return f"Node {node_index}"
 
-    final_num_nodes = 2 ** num_iterations
-    
     # Determine which class this node predicts
-    if hierarchical == "prediction_routing":
-        pred_class = get_node_class(node_index, num_iterations)
-    elif hierarchical == "correct_label_routing":
-        pred_class = get_node_class_correct_label(node_index, num_iterations)
-    else:  # "none"
-        pred_class = 1 if node_index >= final_num_nodes // 2 else 0
+    nodes_per_class = get_nodes_per_class(num_iterations)
+    pred_class = node_index // nodes_per_class
 
     # Get class name
     if class_names is not None and pred_class < len(class_names):
@@ -64,13 +63,17 @@ def get_node_label(
 
     # Iteration 2+: Add Easy/Difficult hierarchy using bit extraction
     path_parts = [class_name]
-    
+
+    # For multi-class, extract difficulty bits from within-class position
+    nodes_per_class = get_nodes_per_class(num_iterations)
+    node_within_class = node_index % nodes_per_class
+
     # Extract difficulty bits in chronological order (high to low bit positions)
     # This gives: first split, second split, third split, etc.
     for bit_pos in range(num_iterations - 2, -1, -1):
-        is_difficult = (node_index >> bit_pos) & 1
+        is_difficult = (node_within_class >> bit_pos) & 1
         path_parts.append("Difficult" if is_difficult else "Easy")
-    
+
     return " → ".join(path_parts)
 
 
@@ -111,37 +114,39 @@ def detect_waterbird_dataset(group_labels: Optional[torch.Tensor], group_names: 
 
 def analyze_hierarchical_nodes(
     predicted_hier_classes: torch.Tensor,
-    true_binary_labels: torch.Tensor,
+    true_labels: torch.Tensor,
     group_labels: Optional[torch.Tensor] = None,
     num_iterations: int = 1,
     group_names: Optional[Dict[int, str]] = None,
     verbose: int = 1,
     hierarchical: str = "none",
-    class_names: Optional[Tuple[str, str]] = None,
+    class_names: Optional[Tuple[str, ...]] = None,
+    num_classes: int = 2,
 ) -> Dict[str, Any]:
     """
     Analyze the performance of each node in the hierarchical classifier.
     Args:
         predicted_hier_classes: Predicted hierarchical node indices
-        true_binary_labels: True binary class labels
+        true_labels: True class labels (0 to num_classes-1)
         group_labels: Optional group labels for subgroup analysis
         num_iterations: Number of iterations in the hierarchy
         group_names: Optional mapping from group IDs to names
         verbose: Verbosity level (0=silent, 1=basic, 2=detailed)
-        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
-        class_names: Optional binary class names
+        hierarchical: Routing mode ('none' or 'correct_label_routing')
+        class_names: Optional class names tuple
+        num_classes: Number of base classes (default 2 for binary)
     Returns:
         Dict[str, Any]: Analysis results
     """
     # Convert to numpy for easier processing
     if isinstance(predicted_hier_classes, torch.Tensor):
         predicted_hier_classes = predicted_hier_classes.cpu().numpy()
-    if isinstance(true_binary_labels, torch.Tensor):
-        true_binary_labels = true_binary_labels.cpu().numpy()
+    if isinstance(true_labels, torch.Tensor):
+        true_labels = true_labels.cpu().numpy()
     if group_labels is not None and isinstance(group_labels, torch.Tensor):
         group_labels = group_labels.cpu().numpy()
 
-    final_num_nodes = 2 ** num_iterations
+    final_num_nodes = get_num_nodes(num_iterations, num_classes)
     node_analysis = {}
 
     if verbose:
@@ -151,8 +156,8 @@ def analyze_hierarchical_nodes(
 
     for node_idx in range(final_num_nodes):
         node_info = _analyze_single_node(
-            node_idx, predicted_hier_classes, true_binary_labels, group_labels,
-            num_iterations, group_names, verbose, hierarchical, class_names
+            node_idx, predicted_hier_classes, true_labels, group_labels,
+            num_iterations, group_names, verbose, hierarchical, class_names, num_classes
         )
         node_analysis[f'node_{node_idx}'] = node_info
 
@@ -180,33 +185,29 @@ def analyze_hierarchical_nodes(
 
 
 def _analyze_single_node(
-    node_idx: int, predicted_hier_classes: np.ndarray, true_binary_labels: np.ndarray,
+    node_idx: int, predicted_hier_classes: np.ndarray, true_labels: np.ndarray,
     group_labels: Optional[np.ndarray], num_iterations: int, group_names: Optional[Dict[int, str]],
-    verbose: int, hierarchical: str = "none", class_names: Optional[Tuple[str, str]] = None
+    verbose: int, hierarchical: str = "none", class_names: Optional[Tuple[str, ...]] = None,
+    num_classes: int = 2
 ) -> Dict[str, Any]:
     """Analyze a single node - simple helper to reduce the monster function."""
     mask = (predicted_hier_classes == node_idx)
     population = np.sum(mask)
-    final_num_nodes = 2 ** num_iterations
 
     # Basic node info
-    path_str = get_node_label(node_idx, num_iterations, class_names, hierarchical)
-    if hierarchical == "prediction_routing":
-        node_predicts_binary = get_node_class(node_idx, num_iterations)
-    elif hierarchical == "correct_label_routing":
-        node_predicts_binary = get_node_class_correct_label(node_idx, num_iterations)
-    else:  # "none"
-        node_predicts_binary = 1 if node_idx >= final_num_nodes / 2 else 0
+    path_str = get_node_label(node_idx, num_iterations, class_names, hierarchical, num_classes)
+    nodes_per_class = get_nodes_per_class(num_iterations)
+    node_predicts_class = node_idx // nodes_per_class
 
-    if class_names and node_predicts_binary < len(class_names):
-        prediction_str = class_names[node_predicts_binary]
+    if class_names and node_predicts_class < len(class_names):
+        prediction_str = class_names[node_predicts_class]
     else:
-        prediction_str = f"Class {node_predicts_binary}"
+        prediction_str = f"Class {node_predicts_class}"
 
     node_info = {
         'node_index': node_idx,
         'path_description': path_str,
-        'predicted_class': node_predicts_binary,
+        'predicted_class': node_predicts_class,
         'population': int(population),
         'percentage': float(population / len(predicted_hier_classes) * 100)
     }
@@ -223,14 +224,14 @@ def _analyze_single_node(
             print("  Status: UNUSED (no samples routed to this node)")
     else:
         # Calculate accuracy
-        true_labels_in_node = true_binary_labels[mask]
-        accuracy = np.mean(true_labels_in_node == node_predicts_binary)
+        true_labels_in_node = true_labels[mask]
+        accuracy = np.mean(true_labels_in_node == node_predicts_class)
         node_info['accuracy'] = float(accuracy)
 
         if verbose:
             print(f"  Accuracy: {accuracy * 100:.2f}%")
 
-        # Group analysis
+        # Group analysis (for binary datasets with 4 groups)
         group_breakdown = {}
         if group_labels is not None:
             groups_in_node = group_labels[mask]
@@ -243,8 +244,10 @@ def _analyze_single_node(
 
                 if group_population > 0:
                     group_name = group_names.get(group_id, f"Group_{group_id}") if group_names else f"Group_{group_id}"
-                    expected_label = 1 if group_id >= 2 else 0
-                    is_correct_prediction = (node_predicts_binary == expected_label)
+                    # For binary: expected_label = 1 if group_id >= 2 else 0
+                    # For multi-class: group_id is typically just the class label
+                    expected_label = group_id // 2 if num_classes == 2 else group_id % num_classes
+                    is_correct_prediction = (node_predicts_class == expected_label)
 
                     group_breakdown[group_name] = {
                         'population': int(group_population),
@@ -270,9 +273,12 @@ def analyze_prediction_paths(
     """
     Analyze the prediction paths taken by different samples.
 
+    Note: This is a binary-only visualization utility. For multi-class datasets,
+    use the main analysis functions instead.
+
     Args:
         predicted_hier_classes: Predicted hierarchical classes
-        true_binary_labels: True binary labels
+        true_binary_labels: True binary labels (0 or 1)
         num_iterations: Number of iterations
 
     Returns:
@@ -318,18 +324,23 @@ def analyze_prediction_paths(
 
 def generate_hierarchy_visualization_data(
     predicted_hier_classes: torch.Tensor,
-    true_binary_labels: torch.Tensor,
+    true_labels: torch.Tensor,
     num_iterations: int,
-    hierarchical: str = "none"
+    hierarchical: str = "none",
+    num_classes: int = 2
 ) -> Dict[str, Any]:
     """
     Generate data for visualizing the hierarchical classification results.
 
+    Note: This visualization utility currently generates a binary tree structure.
+    The tree structure display assumes binary branching (easy/hard splits).
+
     Args:
         predicted_hier_classes: Predicted hierarchical classes
-        true_binary_labels: True binary labels
+        true_labels: True class labels
         num_iterations: Number of iterations
-        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
+        hierarchical: Routing mode ('none' or 'correct_label_routing')
+        num_classes: Number of base classes (default 2 for binary)
 
     Returns:
         Dict[str, Any]: Visualization data
@@ -337,10 +348,10 @@ def generate_hierarchy_visualization_data(
     # Convert to numpy
     if isinstance(predicted_hier_classes, torch.Tensor):
         predicted_hier_classes = predicted_hier_classes.cpu().numpy()
-    if isinstance(true_binary_labels, torch.Tensor):
-        true_binary_labels = true_binary_labels.cpu().numpy()
+    if isinstance(true_labels, torch.Tensor):
+        true_labels = true_labels.cpu().numpy()
 
-    final_num_nodes = 2 ** num_iterations
+    final_num_nodes = get_num_nodes(num_iterations, num_classes)
 
     # Create tree structure data
     tree_data = {
@@ -357,13 +368,9 @@ def generate_hierarchy_visualization_data(
                 node_id = f"L{level}_N{node_idx}"
                 mask = (predicted_hier_classes == node_idx)
                 population = np.sum(mask)
-                if hierarchical == "prediction_routing":
-                    node_class = get_node_class(node_idx, num_iterations)
-                elif hierarchical == "correct_label_routing":
-                    node_class = get_node_class_correct_label(node_idx, num_iterations)
-                else:  # "none"
-                    node_class = 1 if node_idx >= final_num_nodes / 2 else 0
-                accuracy = np.mean(true_binary_labels[mask] == node_class) if population > 0 else 0.0
+                nodes_per_class = get_nodes_per_class(num_iterations)
+                node_class = node_idx // nodes_per_class
+                accuracy = np.mean(true_labels[mask] == node_class) if population > 0 else 0.0
             else:
                 # Intermediate levels
                 node_id = f"L{level}_N{node_idx}"

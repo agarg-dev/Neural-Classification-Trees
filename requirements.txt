@@ -1,17 +1,28 @@
-# Core dependencies
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.21.0
-pandas>=1.3.0
-scikit-learn>=1.0.0
-Pillow>=8.3.0
+# Neural Classification Trees - Requirements for Compute Canada
+# ============================================================
+# Install with: pip install --no-index -r requirements.txt
 
-# Optional dependencies for enhanced functionality
-tqdm>=4.62.0
-matplotlib>=3.4.0
-seaborn>=0.11.0
-requests>=2.26.0
-grad-cam>=1.4.0  # For attribution visualizations (legacy)
-xplique>=1.3.0  # For Xplique attribution library
-captum>=0.7.0  # For Captum attribution library (recommended)
-wandb>=0.15.0  # For experiment tracking and visualization
+# Core
+torch==2.9.1
+torchvision==0.24.1
+numpy==2.3.3
+pandas==2.3.3
+scikit-learn==1.7.1
+Pillow-SIMD==9.5.0.post2
+
+# Visualization
+tqdm==4.67.1
+matplotlib==3.10.1
+seaborn==0.13.2
+
+# Model interpretability
+captum==0.7.0
+
+# Experiment tracking
+wandb==0.21.2
+
+# Config parsing
+PyYAML==6.0.2
+
+# Hyperparameter tuning
+optuna==4.5.0

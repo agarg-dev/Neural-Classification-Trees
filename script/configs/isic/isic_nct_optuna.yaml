@@ -1,0 +1,153 @@
+# # NCT Configuration for ISIC Dataset
+# # Using George paper's recommended hyperparameters for ISIC
+# # Reference: https://github.com/HazyResearch/hidden-stratification
+
+# # Training parameters
+# num_iterations: 3
+# epochs_per_iteration: [50, 50, 50]
+# batch_size: 256
+# seed: 42
+
+# # Model architecture
+# backbone: resnet50
+# pretrained: true
+# head_hidden_dim: 64
+# head_dropout: 0.1
+
+# # Learning rates (George paper uses 0.001 for SGD)
+# initial_base_lr: 5.0e-05
+# initial_head_lr: 8.0e-06
+# lr_decay_factor: 2.0
+
+# # Optimizer configuration (George paper uses SGD)
+# optimizer:
+#     type: adamw
+#     weight_decay: 0.001
+#     betas: [0.9, 0.999]
+
+# # Scheduler configuration (George paper uses MultiStepLR with milestone at 15)
+# scheduler:
+#     type: step
+#     step_size: 15
+#     gamma: 0.1
+
+# # Loss and regularization
+# use_class_weights: true
+# max_class_weight: 20.0
+# regularization_type: elastic_net
+# lambda_l1: 0.001
+# aux_loss_weight: 1
+
+# # Training phases
+# # George paper trains end-to-end, so we use phase1_epochs_ratio of 0.0
+# # to skip phase 1 (frozen backbone) and go straight to full fine-tuning
+# phase1_epochs_ratio: [1, 0.3, 0.3]
+# phase1_patience: 15
+# phase2_patience: 5
+# early_stopping: true
+
+# # Routing strategy
+# routing_strategy: correctness
+# hierarchical_architecture: correct_label_routing
+
+# model_selection_criterion: val_loss
+
+# # Data parameters
+# image_size: 224
+# num_workers: 16
+# pin_memory: true
+# cache_images_in_memory: false
+
+# # Logging
+# log_attributions: true
+# log_epoch_metrics: true
+# verbose: 2
+
+# # Wandb configuration
+# wandb_enabled: true
+# wandb_project: nct-isic
+# wandb_entity: ankurgarg-university-of-calgary-in-alberta
+# wandb_tags: [arc, isic, resnet50, george-params]
+
+# # Checkpoint settings
+# save_iteration_checkpoints: true
+# checkpoint_dir: ./checkpoints
+# attribution_dir: ./attributions
+
+# NCT Configuration for ISIC Dataset
+# Using George paper's recommended hyperparameters for ISIC
+# Reference: https://github.com/HazyResearch/hidden-stratification
+
+# Training parameters
+num_iterations: 3
+epochs_per_iteration: [100, 100, 100]
+batch_size: 128
+seed: 42
+
+# Model architecture
+backbone: resnet50
+pretrained: true
+head_hidden_dim: 64
+head_dropout: 0.5
+
+# Learning rates (George paper uses 0.001 for SGD)
+initial_base_lr: 5.0e-06
+initial_head_lr: 0.0005
+lr_decay_factor: 1.25
+
+# Optimizer configuration (George paper uses SGD)
+optimizer:
+    type: adamw
+    weight_decay: 0.5
+    betas: [0.9, 0.999]
+
+# Scheduler configuration (George paper uses MultiStepLR with milestone at 15)
+scheduler:
+    type: step
+    step_size: 15
+    gamma: 0.1
+
+# Loss and regularization
+use_class_weights: true
+max_class_weight: 5.0
+regularization_type: elastic_net
+lambda_l1: 1
+aux_loss_weight: 0.3
+
+# Training phases
+# George paper trains end-to-end, so we use phase1_epochs_ratio of 0.0
+# to skip phase 1 (frozen backbone) and go straight to full fine-tuning
+phase1_epochs_ratio: [1, 0.6, 0.6]
+phase1_patience: 15
+phase2_patience: 15
+early_stopping: true
+
+# Routing strategy
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+
+model_selection_criterion: auto
+
+# Data parameters
+image_size: 224
+num_workers: 16
+pin_memory: true
+cache_images_in_memory: false
+
+# Logging
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+# Wandb configuration
+wandb_enabled: true
+wandb_project: nct-isic
+wandb_entity: ankurgarg-university-of-calgary-in-alberta
+wandb_tags: [arc, isic, resnet50, george-params]
+
+# Checkpoint settings
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions
+
+# 'initial_base_lr': 5e-06, 'initial_head_lr': 0.0005, 'lr_decay_factor': 1.25, 'weight_decay': 0.5, 'lambda_l1': 1.0, 'head_hidden_dim': 64, 'head_dropout': 0.5, 'phase1_ratio_iter2': 0.6000000000000001, 'max_class_weight': 5, 'skip_class_weights_iter1': False, 'aux_loss_weight': 0.30000000000000004}

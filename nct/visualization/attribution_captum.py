@@ -26,7 +26,6 @@ except ImportError:
     CAPTUM_AVAILABLE = False
 
 from ..data.datasets import extract_labels_from_dataset
-from ..utils.hierarchical import get_node_class, get_node_class_correct_label
 from ..utils.seed import set_seed
 from ..utils.image import denormalize_image
 from ..evaluation.analysis import get_node_label
@@ -86,10 +85,14 @@ class CaptumAttribution:
         self._current_seed = None
 
     def _get_target_layer(self, model: nn.Module) -> nn.Module:
-        """Heuristic to find the last convolutional layer (ResNet specific)."""
+        """Heuristic to find the last convolutional layer."""
+        # ResNet backbone
         if hasattr(model, 'base') and hasattr(model.base, 'layer4'):
             return model.base.layer4[-1]
-        raise ValueError("Could not detect target layer. Model must have 'base.layer4'.")
+        # LeNet5 backbone - use conv2 as the last conv layer
+        if hasattr(model, 'base') and hasattr(model.base, 'conv2'):
+            return model.base.conv2
+        raise ValueError("Could not detect target layer. Model must have 'base.layer4' (ResNet) or 'base.conv2' (LeNet5).")
 
     def _fix_relu_inplace(self, model: nn.Module):
         """
@@ -174,11 +177,21 @@ class CaptumAttribution:
                 batch_images, target=batch_targets, nt_type='smoothgrad_sq', nt_samples=10, stdevs=0.15
             )
 
-        # 4. Occlusion: Use small stride.
+        # 4. Occlusion: Use adaptive window size based on image dimensions.
         elif isinstance(explainer, Occlusion):
+            num_channels = batch_images.shape[1]
+            img_size = batch_images.shape[-1]
+            # Use smaller window for smaller images (e.g., 28x28 MNIST)
+            if img_size <= 32:
+                window_size = 4
+                stride = 1
+            else:
+                window_size = 8
+                stride = 2
             attributions = explainer.attribute(
                 batch_images, target=batch_targets,
-                sliding_window_shapes=(3, 8, 8), strides=(3, 2, 2)
+                sliding_window_shapes=(num_channels, window_size, window_size),
+                strides=(num_channels, stride, stride)
             )
 
         else:
@@ -257,8 +270,16 @@ class CaptumAttribution:
         return results
 
     def _denorm(self, tensor):
-        mean = torch.tensor([0.485, 0.456, 0.406], device=tensor.device).view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device=tensor.device).view(1, 3, 1, 1)
+        """Denormalize tensor for visualization. Auto-detects grayscale vs RGB."""
+        num_channels = tensor.shape[1]
+        if num_channels == 1:
+            # Grayscale (MNIST/UMNIST)
+            mean = torch.tensor([0.1307], device=tensor.device).view(1, 1, 1, 1)
+            std = torch.tensor([0.3081], device=tensor.device).view(1, 1, 1, 1)
+        else:
+            # RGB (ImageNet normalization)
+            mean = torch.tensor([0.485, 0.456, 0.406], device=tensor.device).view(1, 3, 1, 1)
+            std = torch.tensor([0.229, 0.224, 0.225], device=tensor.device).view(1, 3, 1, 1)
         out = tensor * std + mean
         return torch.clamp(out, 0, 1)
 
@@ -277,8 +298,14 @@ class CaptumAttribution:
         return attr
 
     def _safe_visualize(self, attr, img_tensor, fig, ax, title):
-        img_rgb = self._denorm(img_tensor.unsqueeze(0)).squeeze(0).permute(1, 2, 0).cpu().numpy()
-        
+        img_denorm = self._denorm(img_tensor.unsqueeze(0)).squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+        # Convert grayscale to RGB for visualization (Captum expects RGB)
+        if img_denorm.shape[2] == 1:
+            img_rgb = np.repeat(img_denorm, 3, axis=2)
+        else:
+            img_rgb = img_denorm
+
         if np.max(attr) - np.min(attr) < 1e-5:
             ax.imshow(img_rgb)
             ax.set_title(f"{title}\n(No Attribution)", fontsize=8)
@@ -302,15 +329,15 @@ class CaptumAttribution:
                 alpha = 0.7
 
             viz.visualize_image_attr(
-                attr, img_rgb, 
-                method="blended_heat_map", 
-                sign=sign, 
-                show_colorbar=False, 
-                title=title, 
+                attr, img_rgb,
+                method="blended_heat_map",
+                sign=sign,
+                show_colorbar=False,
+                title=title,
                 cmap=cmap,
                 outlier_perc=outlier,
                 alpha_overlay=alpha,
-                plt_fig_axis=(fig, ax), 
+                plt_fig_axis=(fig, ax),
                 use_pyplot=False
             )
         except Exception:
@@ -503,7 +530,7 @@ class CaptumAttribution:
 #     CAPTUM_AVAILABLE = False
 
 # from ..data.datasets import extract_labels_from_dataset
-# from ..utils.hierarchical import get_node_class, get_node_class_correct_label
+# from ..utils.hierarchical import get_nodes_per_class
 # from ..utils.seed import set_seed
 # from ..utils.image import denormalize_image
 # from ..evaluation.analysis import get_node_label
@@ -891,7 +918,7 @@ class CaptumAttribution:
 #     CAPTUM_AVAILABLE = False
 
 # from ..data.datasets import extract_labels_from_dataset
-# from ..utils.hierarchical import get_node_class, get_node_class_correct_label
+# from ..utils.hierarchical import get_nodes_per_class
 # from ..utils.seed import set_seed
 # from ..utils.image import denormalize_image
 # from ..evaluation.analysis import get_node_label

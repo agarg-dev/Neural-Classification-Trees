@@ -40,7 +40,9 @@ class CheckpointManager:
             'backbone': config.backbone,
             'num_features': model.num_features,
             'head_hidden_dim': config.head_hidden_dim,
-            'head_dropout': config.head_dropout
+            'head_dropout': config.head_dropout,
+            'num_channels': config.num_channels,
+            'num_classes': config.num_classes,
         }
 
         torch.save(checkpoint, checkpoint_path)
@@ -75,7 +77,9 @@ class CheckpointManager:
             'backbone': config.backbone,
             'num_features': model.num_features,
             'head_hidden_dim': config.head_hidden_dim,
-            'head_dropout': config.head_dropout
+            'head_dropout': config.head_dropout,
+            'num_channels': config.num_channels,
+            'num_classes': config.num_classes,
         }
 
         torch.save(checkpoint, filepath)
@@ -173,13 +177,13 @@ class CheckpointManager:
         head_dropout = checkpoint.get('head_dropout', config.head_dropout)
         backbone_name = checkpoint.get('backbone', config.backbone)
         num_features = checkpoint['num_features']
-
-        # add fallback for num_features if not in checkpoint
+        num_channels = checkpoint.get('num_channels', config.num_channels)
         
 
-        # Reconstruct parent_layers for hierarchical modes (prediction_routing and correct_label_routing)
+        # Reconstruct parent_layers for hierarchical modes (correct_label_routing)
+        num_classes = checkpoint.get('num_classes', config.num_classes)
         parent_layers = CheckpointManager._reconstruct_parent_layers(
-            hierarchical, iteration, num_features, head_hidden_dim, head_dropout
+            hierarchical, iteration, num_features, head_hidden_dim, head_dropout, num_classes
         )
 
         # Create model with reconstructed architecture
@@ -191,7 +195,8 @@ class CheckpointManager:
             parent_layers=parent_layers,
             hierarchical=hierarchical,
             head_hidden_dim=head_hidden_dim,
-            head_dropout=head_dropout
+            head_dropout=head_dropout,
+            num_channels=num_channels
         ).to(device)
 
         # Load weights
@@ -204,34 +209,37 @@ class CheckpointManager:
         iteration: int,
         num_features: int,
         head_hidden_dim: int,
-        head_dropout: float
+        head_dropout: float,
+        num_classes: int = 2
     ) -> list:
         """
         Reconstruct parent_layers architecture for hierarchical models.
 
-        In hierarchical modes (prediction_routing and correct_label_routing),
+        In hierarchical modes (correct_label_routing),
         parent layers form a tree structure:
-        - Level 0: 2^1 modules with input from backbone (num_features)
-        - Level k: 2^(k+1) modules with input from previous level (head_hidden_dim)
+        - Level 0: num_classes modules (from iteration 1 -> 2)
+        - Level k: num_classes * 2^k modules
 
         Args:
-            hierarchical: Architecture mode ('none', 'prediction_routing', 'correct_label_routing')
+            hierarchical: Architecture mode ('none' or 'correct_label_routing')
             iteration: Iteration number
             num_features: Backbone feature dimension
             head_hidden_dim: Hidden dimension for heads
             head_dropout: Dropout rate
+            num_classes: Number of base classes (default 2 for binary)
 
         Returns:
             List of parent layer ModuleLists (empty for non-hierarchical mode)
         """
-        # Both prediction_routing and correct_label_routing use tree structure
+        # Both correct_label_routing use tree structure
         if hierarchical == "none" or iteration <= 1:
             return []
 
         parent_layers = []
 
         for level in range(iteration - 1):
-            num_parents = 2 ** (level + 1)
+            # Level 0: num_classes parents, Level k: num_classes * 2^k parents
+            num_parents = num_classes * (2 ** level)
             in_dim = num_features if level == 0 else head_hidden_dim
 
             parent_layer = nn.ModuleList([

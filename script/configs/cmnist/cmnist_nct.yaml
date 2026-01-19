@@ -1,0 +1,78 @@
+# NCT Configuration for CMNIST (Colored MNIST) Dataset
+# Based on Correct-N-Contrast paper (arXiv:2203.01517)
+#
+# Key dataset properties:
+# - 5 classes: digit pairs (0,1)->0, (2,3)->1, (4,5)->2, (6,7)->3, (8,9)->4
+# - Color as spurious attribute (5 colors, 99.5% correlation in training)
+# - RGB input (28x28x3)
+# - Uses LeNet-5 backbone (adapted for RGB)
+
+# Training parameters
+num_iterations: 2
+epochs_per_iteration: [50, 50]
+batch_size: 128
+seed: 42
+
+# Model architecture - LeNet-5 for MNIST-like datasets
+backbone: lenet5
+pretrained: false # LeNet-5 has no pretrained weights
+num_channels: 3 # RGB input (colored MNIST)
+num_classes: 5 # 5-class classification
+head_hidden_dim: 32 # Smaller than ResNet (LeNet outputs 84 features)
+head_dropout: 0.3
+
+# Learning rates (higher since training from scratch)
+initial_base_lr: 1.0e-03
+initial_head_lr: 1.0e-03
+lr_decay_factor: 2.0
+
+# Optimizer configuration
+optimizer:
+    type: adam
+    weight_decay: 1.0e-05
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+
+# Scheduler configuration
+scheduler:
+    type: plateau
+    patience: 5
+    factor: 0.5
+
+# Loss and regularization
+use_class_weights: true
+max_class_weight: 20.0
+regularization_type: l2
+lambda_l1: 1.0e-05
+aux_loss_weight: 0.3
+
+# Training phases
+phase1_epochs_ratio: [0.5, 0.5]
+phase1_patience: 10
+phase2_patience: 5
+early_stopping: true
+model_selection_criterion: auto
+
+# Routing strategy
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+
+# Data parameters
+image_size: 28
+num_workers: 4
+pin_memory: true
+
+# Logging
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+# Wandb configuration
+wandb_enabled: true
+wandb_project: nct-cmnist
+wandb_tags: [cmnist, lenet5, 5class]
+
+# Checkpoint settings
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions

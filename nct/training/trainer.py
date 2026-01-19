@@ -16,6 +16,7 @@ from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 
 from ..core.config import OptimizerConfig, SchedulerConfig
+from ..utils.hierarchical import get_num_nodes
 from .loss import (
     compute_auxiliary_loss,
     compute_l1_penalty,
@@ -65,6 +66,7 @@ class NCTTrainer:
         # Early stopping tracking
         self.best_val_loss = float("inf")
         self.best_worst_group_acc = 0.0  # Track best pseudo worst-group accuracy
+        self.best_difficult_node_acc = 0.0  # Track best difficult node accuracy (DNA)
         self.patience_counter = 0
         self.best_model_weights = None
         self.total_epochs_trained = 0
@@ -120,6 +122,7 @@ class NCTTrainer:
         )
         phase1_best_loss = self.best_val_loss
         phase1_best_wga = self.best_worst_group_acc
+        phase1_best_dna = self.best_difficult_node_acc
         phase1_best_weights = copy.deepcopy(self.best_model_weights)
 
         # Load best weights from phase 1 before starting phase 2
@@ -141,6 +144,7 @@ class NCTTrainer:
         )
         phase2_best_loss = self.best_val_loss
         phase2_best_wga = self.best_worst_group_acc
+        phase2_best_dna = self.best_difficult_node_acc
         phase2_best_weights = copy.deepcopy(self.best_model_weights)
 
         # Load best model from either phase based on the early stopping criterion
@@ -148,8 +152,17 @@ class NCTTrainer:
         use_wga_for_selection = (criterion == "wga") or (
             criterion == "auto" and self.iteration_num > 1
         )
+        use_dna_for_selection = (criterion == "dna") and (self.iteration_num > 1)
 
-        if use_wga_for_selection:
+        if use_dna_for_selection:
+            # Higher is better for difficult node accuracy
+            if phase1_best_dna > phase2_best_dna:
+                self.model.load_state_dict(phase1_best_weights)
+                self.best_model_weights = phase1_best_weights
+            else:
+                self.model.load_state_dict(phase2_best_weights)
+                self.best_model_weights = phase2_best_weights
+        elif use_wga_for_selection:
             # Higher is better for worst-group accuracy
             if phase1_best_wga > phase2_best_wga:
                 self.model.load_state_dict(phase1_best_weights)
@@ -179,6 +192,7 @@ class NCTTrainer:
         """Reset early stopping tracking for new phase."""
         self.best_val_loss = float("inf")
         self.best_worst_group_acc = -1.0  # Initialize to -1 so first epoch always saves
+        self.best_difficult_node_acc = -1.0  # Initialize to -1 so first epoch always saves
         self.patience_counter = 0
         self.best_model_weights = copy.deepcopy(self.model.state_dict())
 
@@ -363,6 +377,16 @@ class NCTTrainer:
             self.logger.log(
                 "    Early stopping criterion: pseudo WGA (filled groups)", level=2
             )
+        elif criterion == "dna":
+            if self.iteration_num == 1:
+                self.logger.log(
+                    "    Early stopping criterion: val_loss (dna: iteration 1)",
+                    level=2,
+                )
+            else:
+                self.logger.log(
+                    "    Early stopping criterion: Difficult Node Accuracy (DNA)", level=2
+                )
         else:  # "auto"
             if self.iteration_num == 1:
                 self.logger.log(
@@ -407,6 +431,8 @@ class NCTTrainer:
                     train_aux_loss=self._last_train_aux_loss,
                     val_aux_loss=self._last_val_aux_loss,
                     worst_group_acc=val_result.get("worst_group_accuracy", 0.0),
+                    difficult_node_acc=val_result.get("difficult_node_accuracy", 0.0),
+                    difficult_node_f1=val_result.get("difficult_node_f1", 0.0),
                 )
 
             if scheduler is not None:
@@ -420,19 +446,39 @@ class NCTTrainer:
             # Early stopping criterion selection:
             # - "val_loss": Always use validation loss
             # - "wga": Always use pseudo worst-group accuracy (filled groups only)
+            # - "dna": val_loss for iteration 1, difficult node accuracy for iteration 2+
             # - "auto": val_loss for iteration 1, wga for iteration 2+
             criterion = self.config.get("model_selection_criterion", "auto")
 
+            use_wga = False
+            use_dna = False
+
             if criterion == "val_loss":
                 use_wga = False
+                use_dna = False
             elif criterion == "wga":
                 use_wga = "worst_group_accuracy_filled" in val_result
+            elif criterion == "dna":
+                # DNA uses val_loss for iteration 1, DNA for iteration 2+
+                use_dna = (
+                    self.iteration_num > 1
+                ) and "difficult_node_accuracy" in val_result
             else:  # "auto"
                 use_wga = (
                     self.iteration_num > 1
                 ) and "worst_group_accuracy_filled" in val_result
 
-            if use_wga:
+            if use_dna:
+                # Higher is better for difficult node accuracy
+                dna = val_result["difficult_node_accuracy"]
+                if dna > self.best_difficult_node_acc:
+                    self.best_difficult_node_acc = dna
+                    self.best_val_loss = val_loss  # Also update for logging
+                    self.patience_counter = 0
+                    self.best_model_weights = copy.deepcopy(self.model.state_dict())
+                else:
+                    self.patience_counter += 1
+            elif use_wga:
                 # Higher is better for worst-group accuracy (use filled groups only)
                 worst_group_acc = val_result["worst_group_accuracy_filled"]
                 if worst_group_acc > self.best_worst_group_acc:
@@ -460,6 +506,8 @@ class NCTTrainer:
                 self._last_train_aux_loss,
                 self._last_val_aux_loss,
                 worst_group_acc=val_result.get("worst_group_accuracy", 0.0),
+                difficult_node_acc=val_result.get("difficult_node_accuracy", 0.0),
+                difficult_node_f1=val_result.get("difficult_node_f1", 0.0),
             )
 
             if self.config["early_stopping"] and self.patience_counter >= patience:
@@ -529,6 +577,7 @@ class NCTTrainer:
                         self.iteration_num,
                         class_weights,
                         max_weight=self.config.get("max_class_weight"),
+                        num_classes=self.config.get("num_classes", 2),
                     )
                     weighted_aux = aux_weight * aux_loss
                     loss = loss + weighted_aux
@@ -609,6 +658,7 @@ class NCTTrainer:
                             self.iteration_num,
                             class_weights,
                             max_weight=self.config.get("max_class_weight"),
+                            num_classes=self.config.get("num_classes", 2),
                         )
                         total_aux_loss += aux_loss.item()
 
@@ -634,13 +684,17 @@ class NCTTrainer:
             all_labels = torch.cat(all_labels)
 
             # Number of pseudo-groups = number of hierarchical nodes at this iteration
-            num_groups = 2**self.iteration_num
+            num_classes = self.config.get('num_classes', 2)
+            num_groups = get_num_nodes(self.iteration_num, num_classes)
 
-            # Compute per-group accuracy
+            # Compute per-group accuracy and sizes
             group_accuracies = []
+            node_sizes = {}
+            per_node_accuracy = {}
             for group_id in range(num_groups):
                 group_mask = all_labels == group_id
                 group_count = group_mask.sum().item()
+                node_sizes[group_id] = group_count
 
                 if group_count > 0:
                     group_correct = (
@@ -648,6 +702,9 @@ class NCTTrainer:
                     )
                     group_acc = group_correct / group_count
                     group_accuracies.append(group_acc)
+                    per_node_accuracy[group_id] = group_acc
+                else:
+                    per_node_accuracy[group_id] = 0.0
 
             # Pseudo worst-group accuracy (minimum across filled hierarchical nodes)
             if len(group_accuracies) > 0:
@@ -660,5 +717,32 @@ class NCTTrainer:
                 result["accuracy"] = avg_acc
                 result["num_groups_present"] = len(group_accuracies)
                 result["num_groups_expected"] = num_groups
+                result["node_sizes"] = node_sizes
+                result["per_node_accuracy"] = per_node_accuracy
+
+            # Compute difficult node accuracy (DNA) and F1
+            # Difficult nodes have odd indices (1, 3, 5, 7, ...)
+            all_labels_np = all_labels.numpy()
+            all_preds_np = all_preds.numpy()
+            difficult_mask = (all_labels_np % 2 == 1)
+
+            if difficult_mask.sum() > 0:
+                difficult_correct = (all_preds_np[difficult_mask] == all_labels_np[difficult_mask]).sum()
+                difficult_total = difficult_mask.sum()
+                dna = float(difficult_correct / difficult_total)
+                # Compute F1 on difficult nodes
+                from sklearn.metrics import f1_score as sklearn_f1
+                dnf1 = float(sklearn_f1(
+                    all_labels_np[difficult_mask],
+                    all_preds_np[difficult_mask],
+                    average="macro",
+                    zero_division=1.0
+                ))
+            else:
+                dna = 1.0  # No difficult samples = perfect routing
+                dnf1 = 1.0
+
+            result["difficult_node_accuracy"] = dna
+            result["difficult_node_f1"] = dnf1
 
         return result

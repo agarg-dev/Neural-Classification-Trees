@@ -102,6 +102,8 @@ class NCTConfig:
     pretrained: bool = True
     head_hidden_dim: int = 256
     head_dropout: float = 0.3
+    num_channels: int = 3  # Input channels (3 for RGB, 1 for grayscale)
+    num_classes: int = 2  # Number of base classes (2 for binary, 5 for CMNIST, etc.)
 
     # Optimizer configuration
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
@@ -114,6 +116,7 @@ class NCTConfig:
 
     # Loss parameters
     use_class_weights: bool = True
+    skip_class_weights_iter1: bool = False  # Skip class weights in iteration 1 (to make failures more systematic)
     max_class_weight: Optional[float] = (
         None  # Maximum class weight cap (None = no clamping)
     )
@@ -126,7 +129,7 @@ class NCTConfig:
     phase1_patience: int = 10
     phase2_patience: int = 10
     early_stopping: bool = True
-    model_selection_criterion: str = "auto"  # 'val_loss', 'wga', or 'auto' (auto = val_loss for iter1, wga for iter2+)
+    model_selection_criterion: str = "auto"  # 'val_loss', 'wga', 'dna', or 'auto' (auto = val_loss for iter1, wga for iter2+)
     save_iteration_checkpoints: bool = True
     checkpoint_dir: str = "./checkpoints"
     attribution_dir: str = "./attributions"
@@ -139,13 +142,13 @@ class NCTConfig:
     node_balanced_sampling: bool = False
 
     # Hierarchical architecture mode
-    hierarchical_architecture: str = (
-        "none"  # 'none', 'prediction_routing', 'correct_label_routing'
-    )
+    # 'none': Simple parallel heads (no weight sharing between iterations)
+    # 'correct_label_routing': Tree structure with parent layer weight sharing
+    hierarchical_architecture: str = "correct_label_routing"
 
     # Data parameters
     image_size: int = 224
-    num_workers: int = 0
+    num_workers: int = 8
     pin_memory: bool = True
     cache_images_in_memory: bool = (
         False  # Cache PIL images in RAM (causes OOM on large datasets)
@@ -204,7 +207,7 @@ class NCTConfig:
                 f"routing_strategy must be one of {valid_routing_strategies}, got '{self.routing_strategy}'"
             )
 
-        valid_model_selection_criteria = ["val_loss", "wga", "auto"]
+        valid_model_selection_criteria = ["val_loss", "wga", "dna", "auto"]
         if self.model_selection_criterion not in valid_model_selection_criteria:
             raise ValueError(
                 f"model_selection_criterion must be one of {valid_model_selection_criteria}, got '{self.model_selection_criterion}'"
@@ -212,7 +215,6 @@ class NCTConfig:
 
         valid_hierarchical_modes = [
             "none",
-            "prediction_routing",
             "correct_label_routing",
         ]
         if self.hierarchical_architecture not in valid_hierarchical_modes:

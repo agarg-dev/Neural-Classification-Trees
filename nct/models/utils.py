@@ -16,6 +16,7 @@ def initialize_or_update_model(
     verbose: int = 0,
     iteration: int = 1,
     hierarchical: str = "none",
+    num_channels: int = 3,
     **model_kwargs
 ) -> HierarchicalClassifier:
     """
@@ -28,7 +29,7 @@ def initialize_or_update_model(
         device: Device to place the model on
         verbose: Verbosity level
         iteration: Current iteration number (1-indexed)
-        hierarchical: Routing mode ('none', 'prediction_routing', 'correct_label_routing')
+        hierarchical: Routing mode ('none' or 'correct_label_routing')
         **model_kwargs: Additional arguments for HierarchicalClassifier
     Returns:
         HierarchicalClassifier: New model with optionally transferred weights
@@ -37,11 +38,11 @@ def initialize_or_update_model(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Determine if this mode uses tree structure
-    # Both prediction_routing and correct_label_routing use tree structure
+    # Both correct_label_routing use tree structure
     # Only "none" uses simple parallel heads
     use_tree_structure = (hierarchical != "none")
 
-    # Build parent layers for hierarchical modes (prediction_routing and correct_label_routing)
+    # Build parent layers for hierarchical modes (correct_label_routing)
     parent_layers = None
     if prev_model is not None and use_tree_structure and iteration > 1:
         # Copy existing parent layers
@@ -68,6 +69,7 @@ def initialize_or_update_model(
         iteration=iteration,
         parent_layers=parent_layers,
         hierarchical=hierarchical,
+        num_channels=num_channels,
         **model_kwargs
     ).to(device)
 
@@ -82,7 +84,7 @@ def initialize_or_update_model(
                 print(f"Backbone transfer failed: {e}")
 
         # Non-hierarchical mode (none): Transfer head weights to both children
-        # Hierarchical modes (prediction_routing, correct_label_routing): Parent layers already transferred above
+        # Hierarchical modes (correct_label_routing): Parent layers already transferred above
         if not use_tree_structure:
             for old_head_idx, old_head in enumerate(prev_model.output_heads):
                 easy_idx = old_head_idx * 2

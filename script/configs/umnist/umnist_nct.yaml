@@ -1,0 +1,80 @@
+# NCT Configuration for UMNIST Dataset
+# Based on GEORGE paper settings (arXiv:2011.12945) adapted for NCT
+#
+# Key differences from RGB datasets:
+# - Uses LeNet-5 backbone (no pretrained weights, grayscale input)
+# - Higher learning rates (no pretrained features to preserve)
+# - Lower weight decay (smaller model needs less regularization)
+# - Smaller head dimensions (LeNet outputs 84 features vs ResNet's 2048)
+
+# Training parameters
+num_iterations: 3
+epochs_per_iteration: [50, 50, 50] # More epochs for iteration 1 (learning from scratch)
+batch_size: 128 # From GEORGE paper
+seed: 42
+
+# Model architecture - LeNet-5 for MNIST-like datasets
+backbone: lenet5
+pretrained: false # LeNet-5 has no pretrained weights
+num_channels: 1 # Grayscale input (overridden by dataset config automatically)
+head_hidden_dim: 32 # Smaller than ResNet (LeNet outputs 84 features)
+head_dropout: 0.3
+
+# Learning rates (higher than ResNet since training from scratch)
+# GEORGE uses lr=0.002 for standard training
+initial_base_lr: 1.0e-03
+initial_head_lr: 1.0e-03
+lr_decay_factor: 2.0
+
+# Optimizer configuration (from GEORGE paper: Adam with weight_decay=1e-5)
+optimizer:
+    type: adam
+    weight_decay: 1.0e-05 # Much lower than ResNet (smaller model)
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+
+# Scheduler configuration
+# GEORGE uses MultiStepLR [50, 75], but plateau works better for NCT's iterative training
+scheduler:
+    type: plateau
+    patience: 5
+    factor: 0.5
+
+# Loss and regularization
+use_class_weights: true
+max_class_weight: 20.0
+regularization_type: l2
+lambda_l1: 1.0e-05
+aux_loss_weight: 0.3 # Lower than ResNet (simpler model benefits less from aux loss)
+
+# Training phases
+phase1_epochs_ratio: [0.5, 0.5, 0.5] # More phase 1 for iteration 1 (learning from scratch)
+phase1_patience: 10
+phase2_patience: 5
+early_stopping: true
+model_selection_criterion: auto
+
+# Routing strategy
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+
+# Data parameters
+image_size: 28
+num_workers: 4
+pin_memory: true
+
+# Logging
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+# Wandb configuration
+wandb_enabled: true
+wandb_project: nct-umnist
+wandb_entity: ankurgarg-university-of-calgary-in-alberta
+wandb_tags: [arc, umnist, lenet5]
+
+# Checkpoint settings
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions

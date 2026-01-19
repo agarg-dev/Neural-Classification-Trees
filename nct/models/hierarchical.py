@@ -9,7 +9,54 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models
+
+
+class LeNet5(nn.Module):
+    """
+    LeNet-5 architecture for MNIST/UMNIST (grayscale 28x28 images).
+
+    Based on GEORGE paper configuration for MNIST experiments.
+    Architecture: Conv(6) -> Pool -> Conv(16) -> Pool -> FC(120) -> FC(84)
+    Output features: 84 dimensions
+    """
+
+    def __init__(self, num_channels: int = 1):
+        super().__init__()
+        self.num_channels = num_channels
+
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(
+            in_channels=self.num_channels, out_channels=6, kernel_size=5, padding=2
+        )
+        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)
+
+        # Fully connected layers (feature extractor part)
+        # After conv layers on 28x28: 16 * 5 * 5 = 400
+        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 84)
+
+        # Placeholder for compatibility with ResNet interface
+        self.fc = nn.Linear(84, 84)  # Will be replaced with Identity
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Conv block 1
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, 2)
+
+        # Conv block 2
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, 2)
+
+        # Flatten
+        x = x.view(x.size(0), -1)
+
+        # FC layers (feature extraction)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+
+        return x
 
 
 class HierarchicalClassifier(nn.Module):
@@ -35,6 +82,7 @@ class HierarchicalClassifier(nn.Module):
         iteration: int = 1,
         parent_layers: Optional[list] = None,
         hierarchical: str = "none",
+        num_channels: int = 3,
     ):
         """
         Initialize the hierarchical classifier.
@@ -48,7 +96,7 @@ class HierarchicalClassifier(nn.Module):
             num_classes_per_head: Number of output classes per head
             iteration: Current iteration number (1-indexed)
             parent_layers: List of parent layers from previous iterations (for tree mode)
-            hierarchical: Hierarchical architecture mode ("none", "prediction_routing", "correct_label_routing")
+            hierarchical: Hierarchical architecture mode ("none" or "correct_label_routing")
         """
         super().__init__()
 
@@ -57,14 +105,17 @@ class HierarchicalClassifier(nn.Module):
         self.iteration = iteration
         self.hierarchical = hierarchical
         self.head_hidden_dim = head_hidden_dim
+        self.num_channels = num_channels
 
         # Initialize backbone
-        self.base = self._create_backbone(backbone, pretrained)
+        self.base = self._create_backbone(backbone, pretrained, num_channels)
         num_features = self._get_backbone_features(self.base)
         self.num_features = num_features
 
-        # Remove original classifier (ResNet always has .fc)
-        self.base.fc = nn.Identity()
+        # Remove original classifier
+        # ResNet has .fc, LeNet5 already outputs features directly
+        if hasattr(self.base, "fc") and not isinstance(self.base, LeNet5):
+            self.base.fc = nn.Identity()
 
         if freeze_base:
             for param in self.base.parameters():
@@ -77,7 +128,7 @@ class HierarchicalClassifier(nn.Module):
 
         # Create output heads based on mode
         if hierarchical != "none" and iteration > 1:
-            # Hierarchical tree structure (prediction_routing or correct_label_routing)
+            # Hierarchical tree structure (correct_label_routing)
             # Iteration 2+: heads connect to parent layer output
             self.output_heads = nn.ModuleList(
                 [
@@ -104,7 +155,9 @@ class HierarchicalClassifier(nn.Module):
                 ]
             )
 
-    def _create_backbone(self, backbone: str, pretrained: bool) -> nn.Module:
+    def _create_backbone(
+        self, backbone: str, pretrained: bool, num_channels: int = 3
+    ) -> nn.Module:
         """Create backbone network."""
         if backbone == "resnet50":
             weights = "IMAGENET1K_V1" if pretrained else None
@@ -115,11 +168,16 @@ class HierarchicalClassifier(nn.Module):
         elif backbone == "resnet34":
             weights = "IMAGENET1K_V1" if pretrained else None
             return models.resnet34(weights=weights)
+        elif backbone == "lenet5":
+            # LeNet-5 for grayscale MNIST-like datasets (no pretrained weights)
+            return LeNet5(num_channels=num_channels)
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
 
-    def _get_backbone_features(self, backbone: nn.Module):
-        """Get number of features from ResNet backbone."""
+    def _get_backbone_features(self, backbone: nn.Module) -> int:
+        """Get number of features from backbone."""
+        if isinstance(backbone, LeNet5):
+            return 84  # LeNet-5 outputs 84-dimensional features
         return backbone.fc.in_features
 
     def _create_head(
@@ -150,7 +208,7 @@ class HierarchicalClassifier(nn.Module):
 
         if self.hierarchical != "none" and self.iteration > 1:
             # Hierarchical tree structure: route through parent layers
-            # Used by both prediction_routing and correct_label_routing
+            # Used by both correct_label_routing
             current_features = [features] * len(self.parent_layers[0])
 
             for parent_layer in self.parent_layers:
@@ -222,7 +280,7 @@ class HierarchicalClassifier(nn.Module):
         # Include parent layers with heads in hierarchical modes
         head_params = list(self.output_heads.parameters())
         if self.hierarchical != "none" and len(self.parent_layers) > 0:
-            # Both prediction_routing and correct_label_routing use parent layers
+            # Both correct_label_routing use parent layers
             for parent_layer in self.parent_layers:
                 head_params.extend(parent_layer.parameters())
         head_params = [p for p in head_params if p.requires_grad]
@@ -244,7 +302,7 @@ class HierarchicalClassifier(nn.Module):
         }
 
         if self.hierarchical != "none":
-            # Both prediction_routing and correct_label_routing use tree structure
+            # Both correct_label_routing use tree structure
             info["iteration"] = self.iteration
             info["num_parent_layers"] = len(self.parent_layers)
 

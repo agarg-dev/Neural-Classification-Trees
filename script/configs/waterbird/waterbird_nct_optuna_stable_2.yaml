@@ -1,0 +1,71 @@
+# NCT Configuration for Waterbird Dataset - Optuna
+
+# Training parameters
+num_iterations: 3
+epochs_per_iteration: [100, 100, 100]
+batch_size: 64
+seed: 42
+
+# Model architecture
+backbone: resnet50
+pretrained: true
+head_hidden_dim: 112 #128
+head_dropout: 0 #0.4
+
+# Learning rates
+initial_base_lr: 5.0e-05
+initial_head_lr: 8.0e-06
+lr_decay_factor: 2.5
+
+# Optimizer configuration
+optimizer:
+    type: adamw
+    weight_decay: 0.1
+    betas: [0.9, 0.999]
+
+# Scheduler configuration
+scheduler:
+    type: plateau
+    eta_min: 1.0e-06
+    patience: 13
+    factor: 0.1
+
+# Loss and regularization
+use_class_weights: True
+max_class_weight: 20.0
+regularization_type: elastic_net #l2
+lambda_l1: 0.001 # 0
+aux_loss_weight: 1.0
+node_balanced_sampling: False
+
+# Training phases
+phase1_epochs_ratio: [1.0, 0.65, 0.65]
+phase1_patience: 15 #15
+phase2_patience: 15 #5
+early_stopping: true
+model_selection_criterion: auto
+
+# Routing strategy
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+
+# Data parameters
+image_size: 224
+num_workers: 8
+pin_memory: true
+
+# Logging
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+# Wandb configuration
+wandb_enabled: true
+wandb_project: nct-waterbirds
+wandb_entity: ankurgarg-university-of-calgary-in-alberta
+wandb_tags: [arc, waterbirds, optuna, cosine]
+
+# Checkpoint settings
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions

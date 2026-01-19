@@ -22,6 +22,7 @@ from ..evaluation.metrics import (
     calculate_basic_metrics,
     calculate_group_metrics,
     calculate_hierarchical_metrics,
+    calculate_subgroup_auroc,
     compute_iteration_transitions,
     compute_pseudo_label_metrics,
     print_evaluation_report,
@@ -32,10 +33,10 @@ from ..training.trainer import NCTTrainer
 from ..utils.checkpoints import CheckpointManager
 from ..utils.device import get_device
 from ..utils.hierarchical import (
-    get_node_class,
-    get_node_class_correct_label,
+    get_num_nodes,
+    get_nodes_per_class,
     node_to_class,
-    node_to_class_correct_label,
+    get_class_node_range,
 )
 from ..utils.logger import NCTLogger
 from ..utils.seed import set_seed
@@ -53,10 +54,16 @@ from .config import NCTConfig
 
 class NCTClassifier:
     """
-    Neural Classification Tree for hierarchical binary classification.
+    Neural Classification Tree for hierarchical classification.
 
     Builds a tree hierarchy of classifiers through iterative training,
-    routing difficult samples to specialized nodes.
+    routing difficult samples to specialized nodes. Supports both binary
+    (2-class) and multi-class (e.g., 5-class CMNIST) classification.
+
+    Node structure per iteration:
+        - Iteration 1: num_classes nodes (one per class)
+        - Iteration 2: num_classes * 2 nodes (easy/hard split per class)
+        - Iteration N: num_classes * 2^(N-1) nodes
 
     Attributes:
         config: Configuration with all hyperparameters.
@@ -109,6 +116,7 @@ class NCTClassifier:
         dataset_name: str = "generic",
         class_names: Optional[Tuple[str, str]] = None,
         group_names: Optional[Dict[int, str]] = None,
+        test_subgroups: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """
         Train the hierarchical classifier on the provided data.
@@ -120,6 +128,7 @@ class NCTClassifier:
             dataset_name: Name of dataset for evaluation (e.g., "waterbird").
             class_names: Optional binary class names (e.g., ("Landbird", "Waterbird")).
             group_names: Optional group ID to name mapping for display.
+            test_subgroups: Optional subgroup masks for AUROC metrics (e.g., ISIC patch/histopathology).
         Returns:
             Dictionary with training results including:
                 - 'val_pseudo_metrics': Validation pseudo-label metrics from final iteration (if available)
@@ -134,11 +143,12 @@ class NCTClassifier:
         # Store class and group names for later use
         self._class_names = class_names
         self._group_names = group_names
+        self._test_subgroups = test_subgroups
 
         y_train = extract_labels_from_dataset(X_train)
         y_val = extract_labels_from_dataset(X_val)
         self.model = self._run_iterative_training(
-            X_train, X_val, y_train, y_val, X_test, group_labels, dataset_name
+            X_train, X_val, y_train, y_val, X_test, group_labels, dataset_name, test_subgroups
         )
         self._is_fitted = True
 
@@ -173,17 +183,10 @@ class NCTClassifier:
 
         test_loader = self._create_iterative_loader(X, is_training=False)
         hierarchical_preds = self._get_hierarchical_predictions(test_loader)
-
-        if self.config.hierarchical_architecture == "prediction_routing":
-            binary_preds = node_to_class(hierarchical_preds, self.config.num_iterations)
-        elif self.config.hierarchical_architecture == "correct_label_routing":
-            binary_preds = node_to_class_correct_label(
-                hierarchical_preds, self.config.num_iterations
-            )
-        else:  # "none"
-            final_num_nodes = 2**self.config.num_iterations
-            binary_preds = (hierarchical_preds >= final_num_nodes / 2).long()
-        return binary_preds.numpy()
+        class_preds = node_to_class(
+            hierarchical_preds, self.config.num_iterations, self.config.num_classes
+        )
+        return class_preds.numpy()
 
     def predict_proba(self, X: Any) -> np.ndarray:
         """
@@ -191,7 +194,7 @@ class NCTClassifier:
         Args:
             X: Input data. Must be a PyTorch Dataset object.
         Returns:
-            Class probabilities as a numpy array of shape (n_samples, 2).
+            Class probabilities as a numpy array of shape (n_samples, num_classes).
         """
         if not self._is_fitted:
             raise ValueError("Model must be fitted first")
@@ -199,49 +202,18 @@ class NCTClassifier:
         test_loader = self._create_iterative_loader(X, is_training=False)
         hierarchical_probs = self._get_hierarchical_probabilities(test_loader)
 
-        final_num_nodes = 2**self.config.num_iterations
+        # Sum probabilities for nodes belonging to each class
+        class_probs = []
+        for class_id in range(self.config.num_classes):
+            start_node, end_node = get_class_node_range(class_id, self.config.num_iterations)
+            class_raw = hierarchical_probs[:, start_node:end_node].sum(dim=1)
+            class_probs.append(class_raw)
 
-        if self.config.hierarchical_architecture == "prediction_routing":
-            class_0_nodes = []
-            class_1_nodes = []
-            for node_id in range(final_num_nodes):
-                if get_node_class(node_id, self.config.num_iterations) == 0:
-                    class_0_nodes.append(node_id)
-                else:
-                    class_1_nodes.append(node_id)
-            # class_0_prob = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-            # class_1_prob = hierarchical_probs[:, class_1_nodes].sum(dim=1)
-            class_0_raw = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-            class_1_raw = hierarchical_probs[:, class_1_nodes].sum(dim=1)
-            total = class_0_raw + class_1_raw
-            class_0_prob = class_0_raw / total
-            class_1_prob = class_1_raw / total
-        elif self.config.hierarchical_architecture == "correct_label_routing":
-            class_0_nodes = []
-            class_1_nodes = []
-            for node_id in range(final_num_nodes):
-                if (
-                    get_node_class_correct_label(node_id, self.config.num_iterations)
-                    == 0
-                ):
-                    class_0_nodes.append(node_id)
-                else:
-                    class_1_nodes.append(node_id)
-            # class_0_prob = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-            # class_1_prob = hierarchical_probs[:, class_1_nodes].sum(dim=1)
-            class_0_raw = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-            class_1_raw = hierarchical_probs[:, class_1_nodes].sum(dim=1)
-            total = class_0_raw + class_1_raw
-            class_0_prob = class_0_raw / total
-            class_1_prob = class_1_raw / total
-        else:  # "none"
-            mid_point = final_num_nodes // 2
-            class_0_raw = hierarchical_probs[:, :mid_point].sum(dim=1)
-            class_1_raw = hierarchical_probs[:, mid_point:].sum(dim=1)
-            total = class_0_raw + class_1_raw
-            class_0_prob = class_0_raw / total
-            class_1_prob = class_1_raw / total
-        return torch.stack([class_0_prob, class_1_prob], dim=1).numpy()
+        # Normalize
+        total = sum(class_probs)
+        class_probs = [p / total for p in class_probs]
+
+        return torch.stack(class_probs, dim=1).numpy()
 
     # ============================================================================
     # DATA UTILITIES - DataLoader Creation
@@ -324,6 +296,7 @@ class NCTClassifier:
         group_names: Optional[Dict[int, str]] = None,
         dataset_name: str = "generic",
         class_names: Optional[Tuple[str, str]] = None,
+        test_subgroups: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate model performance on test data.
@@ -333,6 +306,7 @@ class NCTClassifier:
             group_names: Optional mapping from group IDs to readable names.
             dataset_name: Name of the dataset.
             class_names: Optional binary class names.
+            test_subgroups: Optional subgroup masks for AUROC metrics.
         Returns:
             Dictionary containing evaluation metrics:
                 - basic_metrics: Accuracy, precision, recall, F1.
@@ -349,6 +323,8 @@ class NCTClassifier:
             class_names = self._class_names
         if group_names is None and hasattr(self, "_group_names"):
             group_names = self._group_names
+        if test_subgroups is None and hasattr(self, "_test_subgroups"):
+            test_subgroups = self._test_subgroups
 
         binary_predictions = self.predict(X_test)
         binary_probabilities = self.predict_proba(X_test)
@@ -362,6 +338,12 @@ class NCTClassifier:
         basic_metrics = calculate_basic_metrics(
             y_test_np, binary_predictions, y_prob=y_prob_positive
         )
+
+        # Compute subgroup AUROC if test_subgroups provided
+        subgroup_auroc = calculate_subgroup_auroc(y_test_np, y_prob_positive, test_subgroups)
+        if subgroup_auroc:
+            basic_metrics.update(subgroup_auroc)
+
         results = {"basic_metrics": basic_metrics}
 
         # # Calculate pseudo label metrics (ISSUE- labels are always for test set while we can pass any dataset)
@@ -574,6 +556,7 @@ class NCTClassifier:
         X_test: Optional[Any] = None,
         group_labels: Optional[Any] = None,
         dataset_name: str = "generic",
+        test_subgroups: Optional[Dict[str, np.ndarray]] = None,
     ) -> nn.Module:
         """
         Execute the main iterative training loop.
@@ -587,6 +570,7 @@ class NCTClassifier:
             X_test: Optional test data for per-iteration evaluation.
             group_labels: Optional group labels for test evaluation.
             dataset_name: Name of dataset for evaluation.
+            test_subgroups: Optional subgroup masks for AUROC metrics.
         Returns:
             The trained HierarchicalClassifier model.
         """
@@ -601,17 +585,20 @@ class NCTClassifier:
         )
 
         for i in range(self.config.num_iterations):
-            num_nodes = 2 ** (i + 1)
+            num_nodes = get_num_nodes(i + 1, self.config.num_classes)
             epochs_for_iter = self.config.epochs_per_iteration[i]
 
             # Update trainer's iteration number for logging
             trainer.iteration_num = i + 1
 
             # Compute class weights for imbalanced data
-            # Skip class weights when using node-balanced sampling (they're redundant)
-            if self.config.use_class_weights and not (
-                i > 0 and self.config.node_balanced_sampling
-            ):
+            # Skip class weights when:
+            # - using node-balanced sampling in iteration 2+ (redundant)
+            # - skip_class_weights_iter1 is True and this is iteration 1
+            skip_weights = (i > 0 and self.config.node_balanced_sampling) or (
+                i == 0 and self.config.skip_class_weights_iter1
+            )
+            if self.config.use_class_weights and not skip_weights:
                 class_weights, class_counts = compute_class_weights(
                     current_train_labels,
                     num_nodes,
@@ -652,6 +639,7 @@ class NCTClassifier:
                 hierarchical=self.config.hierarchical_architecture,
                 head_hidden_dim=self.config.head_hidden_dim,
                 head_dropout=self.config.head_dropout,
+                num_channels=self.config.num_channels,
             )
 
             train_iter_dataset = IterativeDataset(
@@ -710,6 +698,7 @@ class NCTClassifier:
                     checkpoint_path,
                     training_results.get("total_epochs", 0),
                     training_results.get("early_stopped", False),
+                    test_subgroups,
                 )
 
             # Update labels for next iteration (returns validation predictions)
@@ -849,15 +838,9 @@ class NCTClassifier:
         Returns:
             Pseudo labels for next iteration (range depends on current iteration)
         """
-        if self.config.hierarchical_architecture == "prediction_routing":
-            # Route by prediction: incorrectly classified samples go to opposite class's hierarchy
-            return predictions * 2 + is_difficult.long()
-        elif self.config.hierarchical_architecture == "correct_label_routing":
-            # Route by label: all samples of a class stay within that class's hierarchy
-            return labels * 2 + is_difficult.long()
-        else:  # "none"
-            # Simple mode: route by label (same as correct_label_routing for routing)
-            return labels * 2 + is_difficult.long()
+        # Route by label: all samples of a class stay within that class's hierarchy
+        # Each class has its own easy/hard split
+        return labels * 2 + is_difficult.long()
 
     def _determine_difficult_samples(
         self,
@@ -1012,14 +995,14 @@ class NCTClassifier:
 
         return torch.cat(all_probabilities)
 
-    def _get_binary_probabilities(
+    def _get_class_probabilities(
         self,
         dataloader: DataLoader,
         iteration: int,
         model: Optional[nn.Module] = None,
     ) -> np.ndarray:
         """
-        Get binary class probabilities from hierarchical model.
+        Get class probabilities from hierarchical model.
 
         Args:
             dataloader: DataLoader to generate probabilities for.
@@ -1027,39 +1010,21 @@ class NCTClassifier:
             model: Model to use. If None, uses self.model.
 
         Returns:
-            Binary class probabilities as numpy array of shape (n_samples, 2).
+            Class probabilities as numpy array of shape (n_samples, num_classes).
         """
         hierarchical_probs = self._get_hierarchical_probabilities(dataloader, model)
-        final_num_nodes = 2**iteration
 
-        if self.config.hierarchical_architecture == "prediction_routing":
-            class_0_nodes = []
-            class_1_nodes = []
-            for node_id in range(final_num_nodes):
-                if get_node_class(node_id, iteration) == 0:
-                    class_0_nodes.append(node_id)
-                else:
-                    class_1_nodes.append(node_id)
-        elif self.config.hierarchical_architecture == "correct_label_routing":
-            class_0_nodes = []
-            class_1_nodes = []
-            for node_id in range(final_num_nodes):
-                if get_node_class_correct_label(node_id, iteration) == 0:
-                    class_0_nodes.append(node_id)
-                else:
-                    class_1_nodes.append(node_id)
-        else:  # "none"
-            mid_point = final_num_nodes // 2
-            class_0_nodes = list(range(mid_point))
-            class_1_nodes = list(range(mid_point, final_num_nodes))
+        # Sum probabilities for nodes belonging to each class
+        class_probs = []
+        for class_id in range(self.config.num_classes):
+            start_node, end_node = get_class_node_range(class_id, iteration)
+            class_raw = hierarchical_probs[:, start_node:end_node].sum(dim=1)
+            class_probs.append(class_raw)
 
-        class_0_raw = hierarchical_probs[:, class_0_nodes].sum(dim=1)
-        class_1_raw = hierarchical_probs[:, class_1_nodes].sum(dim=1)
-        total = class_0_raw + class_1_raw
-        class_0_prob = class_0_raw / total
-        class_1_prob = class_1_raw / total
-
-        return torch.stack([class_0_prob, class_1_prob], dim=1).numpy()
+        # Normalize
+        total = sum(class_probs)
+        class_probs = [p / total for p in class_probs]
+        return torch.stack(class_probs, dim=1).numpy()
 
     # ============================================================================
     # EVALUATION - Per-Iteration Evaluation
@@ -1075,6 +1040,7 @@ class NCTClassifier:
         checkpoint_path: Optional[str] = None,
         num_epochs_trained: int = 0,
         early_stopped: bool = False,
+        test_subgroups: Optional[Dict[str, np.ndarray]] = None,
     ) -> None:
         """
         Evaluate model on test set after a specific iteration.
@@ -1088,6 +1054,7 @@ class NCTClassifier:
             checkpoint_path: Path to saved checkpoint for this iteration.
             num_epochs_trained: Number of epochs trained in this iteration.
             early_stopped: Whether early stopping was triggered.
+            test_subgroups: Optional subgroup masks for AUROC metrics.
         """
         if self.config.verbose == 0:
             return
@@ -1097,28 +1064,21 @@ class NCTClassifier:
         hierarchical_predictions = self._get_hierarchical_predictions(
             test_loader, model=model
         )
-        binary_probabilities = self._get_binary_probabilities(
+        class_probabilities = self._get_class_probabilities(
             test_loader, iteration, model=model
         )
         y_test = extract_labels_from_dataset(X_test)
 
-        # Convert hierarchical to binary predictions
-        if self.config.hierarchical_architecture == "prediction_routing":
-            binary_predictions = node_to_class(hierarchical_predictions, iteration)
-        elif self.config.hierarchical_architecture == "correct_label_routing":
-            binary_predictions = node_to_class_correct_label(
-                hierarchical_predictions, iteration
-            )
-        else:  # "none"
-            final_num_nodes = 2**iteration
-            binary_predictions = (
-                hierarchical_predictions >= final_num_nodes / 2
-            ).long()
+        # Convert hierarchical to class predictions
+        class_predictions = node_to_class(
+            hierarchical_predictions, iteration, self.config.num_classes
+        )
 
         # Convert to numpy
         y_test_np = y_test.cpu().numpy()
-        binary_predictions_np = binary_predictions.cpu().numpy()
-        binary_prob_positive = binary_probabilities[:, 1]  # Probability of class 1
+        class_predictions_np = class_predictions.cpu().numpy()
+        # For binary, use prob of class 1; for multi-class, pass full probability matrix
+        class_prob_for_auroc = class_probabilities[:, 1] if self.config.num_classes == 2 else class_probabilities
         hierarchical_predictions_np = hierarchical_predictions.cpu().numpy()
         group_labels_np = np.array(group_labels) if group_labels is not None else None
 
@@ -1134,7 +1094,7 @@ class NCTClassifier:
             prev_result = self._iteration_results[-1]
             transitions = compute_iteration_transitions(
                 prev_result["predictions"],
-                binary_predictions_np,
+                class_predictions_np,
                 y_test_np,
                 group_labels_np,
             )
@@ -1169,7 +1129,7 @@ class NCTClassifier:
         # Store test results
         self._iteration_results.append(
             {
-                "predictions": binary_predictions_np,
+                "predictions": class_predictions_np,
                 "hierarchical_predictions": hierarchical_predictions_np,
                 "test_pseudo_labels": test_pseudo_labels.cpu().numpy()
                 if test_pseudo_labels is not None
@@ -1186,27 +1146,32 @@ class NCTClassifier:
         ):
             prev_pseudo_labels = self._iteration_results[-2]["test_pseudo_labels"]
             curr_routing = self._iteration_results[-1]["hierarchical_predictions"]
-            num_expected_classes = 2**iteration
+            num_expected_nodes = get_num_nodes(iteration, self.config.num_classes)
             pseudo_metrics = compute_pseudo_label_metrics(
-                prev_pseudo_labels, curr_routing, num_expected_classes
+                prev_pseudo_labels, curr_routing, num_expected_nodes
             )
 
         # Compute test metrics (with AUROC using probability of positive class)
         basic_metrics = calculate_basic_metrics(
-            y_test_np, binary_predictions_np, y_prob=binary_prob_positive
+            y_test_np, class_predictions_np, y_prob=class_prob_for_auroc
         )
         group_results = None
         if group_labels_np is not None:
             group_results = calculate_group_metrics(
                 y_test_np,
-                binary_predictions_np,
+                class_predictions_np,
                 group_labels_np,
-                binary_prob_positive,
+                class_prob_for_auroc,
                 group_names,
             )
         node_metrics = calculate_hierarchical_metrics(
-            hierarchical_predictions_np, iteration, y_test_np, binary_predictions_np
+            hierarchical_predictions_np, iteration, y_test_np, class_predictions_np
         )
+
+        # Compute subgroup AUROC if test_subgroups provided (e.g., ISIC dataset)
+        subgroup_auroc = calculate_subgroup_auroc(y_test_np, class_prob_for_auroc, test_subgroups)
+        if subgroup_auroc:
+            basic_metrics.update(subgroup_auroc)
 
         # Detailed analysis
         if group_labels_np is not None and self.config.verbose >= 2:
@@ -1238,6 +1203,9 @@ class NCTClassifier:
             basic_metrics["pseudo_worst_group_acc"] = pseudo_metrics[
                 "worst_group_accuracy"
             ]
+            basic_metrics["pseudo_difficult_node_acc"] = pseudo_metrics.get(
+                "difficult_node_accuracy", 0.0
+            )
 
         self.logger.log_iteration_summary(
             iteration=iteration,
@@ -1285,11 +1253,11 @@ class NCTClassifier:
                 "val_pseudo_labels"
             )
             if prev_val_pseudo_labels is not None:
-                num_expected_classes = 2**iteration
+                num_expected_nodes = get_num_nodes(iteration, self.config.num_classes)
                 val_pseudo_metrics = compute_pseudo_label_metrics(
                     prev_val_pseudo_labels,
                     val_hierarchical_preds.cpu().numpy(),
-                    num_expected_classes,
+                    num_expected_nodes,
                 )
                 self._iteration_results[-1]["val_pseudo_metrics"] = val_pseudo_metrics
 

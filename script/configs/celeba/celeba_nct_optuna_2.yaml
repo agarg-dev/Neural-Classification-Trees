@@ -1,0 +1,77 @@
+# NCT Configuration for CelebA Dataset (Blond Hair)
+# Consistent structure with Waterbird presets
+
+# Training parameters
+num_iterations: 3
+epochs_per_iteration: [100, 100, 100]
+batch_size: 256
+seed: 42
+
+# Model architecture
+backbone: resnet50
+pretrained: true
+head_hidden_dim: 80
+head_dropout: 0.1
+
+# Learning rates
+initial_base_lr: 8.0e-05
+initial_head_lr: 0.0002
+lr_decay_factor: 2.5
+
+# Optimizer configuration
+optimizer:
+    type: adamw
+    weight_decay: 0.0001
+    betas: [0.9, 0.999]
+    eps: 1.0e-08
+
+# Scheduler configuration
+scheduler:
+    type: plateau
+    patience: 13
+    factor: 0.1
+    eta_min: 1.0e-06
+
+# Loss and regularization
+use_class_weights: true
+max_class_weight: 20.0 # Cap class weights to prevent extreme imbalance effects
+regularization_type: elastic_net
+lambda_l1: 0.01
+aux_loss_weight: 0
+
+# Training phases
+phase1_epochs_ratio: [1.0, 0.35, 0.5]
+phase1_patience: 15
+phase2_patience: 15
+early_stopping: true
+model_selection_criterion: auto
+
+# Routing strategy
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+node_balanced_sampling: false
+
+# Data parameters
+image_size: 224
+num_workers: 16
+pin_memory: true
+
+# Logging
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+# Wandb configuration
+wandb_enabled: true
+wandb_project: nct-celeba
+wandb_entity: ankurgarg-university-of-calgary-in-alberta
+wandb_tags: [arc, celeba, blond-hair, resnet50]
+
+# Checkpoint settings
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions
+
+#'initial_base_lr': 8e-05, 'initial_head_lr': 0.0002, 'lr_decay_factor': 2.5, 'weight_decay': 0.0001, 'lambda_l1': 0.01, 'head_hidden_dim': 80, 'head_dropout': 0.0, 'phase1_ratio_iter2': 0.35000000000000003, 'max_class_weight': 20"
+
+#[I 2026-01-16 13:48:59,027] Trial 57 finished with value: 0.7542545949625595 and parameters: {'initial_base_lr': 8e-05, 'initial_head_lr': 0.0002, 'lr_decay_factor': 2.75, 'weight_decay': 0.0001, 'lambda_l1': 0.01, 'head_hidden_dim': 80, 'head_dropout': 0.1, 'phase1_ratio_iter2': 0.55, 'max_class_weight': 20}. Best is trial 57 with value: 0.7542545949625595.

@@ -131,6 +131,7 @@ def compute_auxiliary_loss(
     iteration: int,
     class_weights: Optional[torch.Tensor] = None,
     max_weight: Optional[float] = None,
+    num_classes: int = 2,
 ) -> torch.Tensor:
     """
     Compute auxiliary loss for parent layer classifications.
@@ -140,9 +141,10 @@ def compute_auxiliary_loss(
 
     Args:
         aux_outputs: List of auxiliary outputs from parent layers (indexed by layer depth)
-        labels: Current iteration's labels (range: 0 to 2^iteration - 1)
+        labels: Current iteration's labels (range: 0 to num_nodes - 1)
         iteration: Current iteration number (1-indexed)
         class_weights: Optional class weights for current iteration
+        num_classes: Number of base classes (default 2 for binary)
 
     Returns:
         Auxiliary loss from immediate parent layer (0.0 if no parent exists)
@@ -154,16 +156,17 @@ def compute_auxiliary_loss(
     parent_outputs = aux_outputs[-1]  # Last layer = most recent parent
 
     # Derive parent labels from current labels
-    # For current label in range [0, 2^iteration), parent label is in [0, 2^(iteration-1))
+    # Parent label = label // 2 (easy/hard split is always binary)
     parent_labels = labels // 2
 
     # Compute parent class weights if main weights provided
     parent_class_weights = None
     if class_weights is not None:
-        num_parent_classes = 2 ** (iteration - 1)
+        # Parent has num_classes * 2^(iteration-2) nodes = get_num_nodes(iteration-1, num_classes)
+        num_parent_nodes = num_classes * (2 ** (iteration - 2)) if iteration > 1 else num_classes
         parent_class_weights = compute_class_weights(
             parent_labels,
-            num_parent_classes,
+            num_parent_nodes,
             max_weight=max_weight,
         )
         parent_class_weights = parent_class_weights.to(class_weights.device)
