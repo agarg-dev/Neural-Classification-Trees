@@ -33,6 +33,7 @@ scheduler:
 # Loss and regularization
 use_class_weights: True
 max_class_weight: 15.0
+min_samples_per_node: 25
 regularization_type: elastic_net #l2
 lambda_l1: 0.01 # 0
 aux_loss_weight: 1.0

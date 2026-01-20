@@ -6,8 +6,8 @@
 #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3_3g.40gb:1
 #SBATCH --time=12:00:00
 #SBATCH --account=rrg-ebrahimi
-#SBATCH --output=/home/agarg/links/scratch/agarg/Neural-Classification-Trees/outputs/logs/tune/waterbird_v1/%j_output.log
-#SBATCH --error=/home/agarg/links/scratch/agarg/Neural-Classification-Trees/outputs/logs/tune/waterbird_v1/%j_error.log
+#SBATCH --output=/home/agarg/links/scratch/agarg/Neural-Classification-Trees/outputs/logs/tune/waterbird_v2/%j_output.log
+#SBATCH --error=/home/agarg/links/scratch/agarg/Neural-Classification-Trees/outputs/logs/tune/waterbird_v2/%j_error.log
 
 # ============================================
 # NCT Optuna Hyperparameter Tuning for Waterbird
@@ -18,7 +18,7 @@ PROJECT_DIR="/home/agarg/links/scratch/agarg/Neural-Classification-Trees"
 ENV_DIR="$HOME/envs/nct_env"
 
 # Create directories
-mkdir -p ${PROJECT_DIR}/outputs/logs/tune/waterbird_v1
+mkdir -p ${PROJECT_DIR}/outputs/logs/tune/waterbird_v2
 mkdir -p ${PROJECT_DIR}/outputs/optuna
 
 # Set environment variables
@@ -57,8 +57,8 @@ python src/tune/tune_narrow.py \
     --data_dir $SLURM_TMPDIR/data \
     --n_trials 300 \
     --seed 42 \
-    --study_name "nct_tune_waterbird_v1" \
-    --storage "sqlite:///${PROJECT_DIR}/outputs/optuna/tune_waterbird_v1.db" \
+    --study_name "nct_tune_waterbird_v2" \
+    --storage "sqlite:///${PROJECT_DIR}/outputs/optuna/tune_waterbird_v2.db" \
     --dataset waterbird \
     --metric wga
 

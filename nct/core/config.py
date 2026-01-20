@@ -140,6 +140,7 @@ class NCTConfig:
     # - 'correctness_certainty': Incorrect -> Hard, Correct but Uncertain -> Hard
     routing_strategy: str = "correctness"
     node_balanced_sampling: bool = False
+    min_samples_per_node: int = 0  # Minimum samples to create a difficult node (0 = disabled)
 
     # Hierarchical architecture mode
     # 'none': Simple parallel heads (no weight sharing between iterations)

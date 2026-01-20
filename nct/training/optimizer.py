@@ -81,12 +81,14 @@ def create_two_stage_optimizer(
     regularization_type: str = 'l2'
 ) -> optim.Optimizer:
     """
-    Create optimizer with different learning rates for backbone and heads.
+    Create optimizer with different learning rates for base and output heads.
 
     Args:
         model_parameters: Dict with 'base' and 'heads' parameter lists
-        base_lr: Learning rate for backbone
-        head_lr: Learning rate for heads
+            - 'base': backbone + parent_layers (use base_lr)
+            - 'heads': output_heads only (use head_lr)
+        base_lr: Learning rate for backbone and parent layers
+        head_lr: Learning rate for output heads
         config: OptimizerConfig object with all hyperparameters
         regularization_type: Type of regularization ('l1', 'l2', 'elastic_net', 'none')
 

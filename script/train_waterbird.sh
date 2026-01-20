@@ -53,7 +53,7 @@ echo "Extracting data..."
 tar -xzf $SLURM_TMPDIR/data/${dataset}.tar.gz -C $SLURM_TMPDIR/data/
 echo "Done."
 
-preset=${dataset}_nct_optuna_stable.yaml
+preset=${dataset}_nct_optuna_stable_2.yaml
 # preset=${dataset}_nct_optuna.yaml
 #for ablation
 # preset=${dataset}_aux_loss_ablation.yaml

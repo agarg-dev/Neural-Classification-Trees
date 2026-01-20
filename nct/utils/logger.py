@@ -122,7 +122,7 @@ class NCTLogger:
             return
 
         if self.verbose == 1:
-            phase_label = "frozen backbone" if phase_num == 1 else "full model"
+            phase_label = "frozen base" if phase_num == 1 else "full model"
             print(
                 f"  Phase {phase_num} ({phase_label}): {epochs} epochs",
                 end="",
@@ -152,13 +152,13 @@ class NCTLogger:
                 )
             wga_info = ""
             if worst_group_acc > 0:
-                wga_info = f", WGA: {worst_group_acc:.3f}"
+                wga_info = f", Val Pseudo-WGA: {worst_group_acc:.3f}"
             dna_info = ""
             if difficult_node_acc > 0:
-                dna_info = f", DNA: {difficult_node_acc:.3f}"
+                dna_info = f", Val DNA: {difficult_node_acc:.3f}"
             dnf1_info = ""
             if difficult_node_f1 > 0:
-                dnf1_info = f", DNF1: {difficult_node_f1:.3f}"
+                dnf1_info = f", Val DNF1: {difficult_node_f1:.3f}"
             print(
                 f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}{aux_info}{wga_info}{dna_info}{dnf1_info}"
             )
@@ -387,58 +387,40 @@ class NCTLogger:
         pseudo_metrics: Optional[Dict[str, Any]] = None,
         group_results: Optional[Dict[str, Any]] = None,
     ):
-        """Print evaluation results to console based on verbosity level."""
+        """Print evaluation results to console based on verbosity level.
+
+        Order: Basic metrics → Worst-Group Accuracy → Group breakdown → Pseudo-label metrics
+        """
         if self.verbose == 0:
             return
 
-        # Print basic metrics
+        # 1. Print basic metrics
         self.log(f"Test Accuracy: {test_metrics['accuracy']:.2%}", level=1)
-        self.log(f"Test Precision: {test_metrics['precision']:.4f}", level=1)
-        self.log(f"Test Recall: {test_metrics['recall']:.4f}", level=1)
-        self.log(f"Test F1 Score: {test_metrics['f1_score']:.4f}", level=1)
         if "auroc" in test_metrics and not math.isnan(test_metrics["auroc"]):
             self.log(f"Test AUROC: {test_metrics['auroc']:.4f}", level=1)
+
+        # 2. Print Worst-Group Accuracy (key metric for spurious correlation)
+        if group_results is not None:
+            self.log(
+                f"Worst-Group Accuracy: {group_results['summary']['worst_group_accuracy']:.2%}",
+                level=1,
+            )
+            if "worst_group_auroc" in group_results["summary"]:
+                self.log(
+                    f"Worst-Group AUROC: {group_results['summary']['worst_group_auroc']:.4f}",
+                    level=1,
+                )
+
+        # 3. Print additional basic metrics (less prominent)
+        self.log(f"Test Precision: {test_metrics['precision']:.4f}", level=2)
+        self.log(f"Test Recall: {test_metrics['recall']:.4f}", level=2)
+        self.log(f"Test F1 Score: {test_metrics['f1_score']:.4f}", level=2)
         if "non_patch_auroc" in test_metrics and not math.isnan(test_metrics["non_patch_auroc"]):
-            self.log(f"Non-Patch AUROC: {test_metrics['non_patch_auroc']:.4f}", level=1)
+            self.log(f"Non-Patch AUROC: {test_metrics['non_patch_auroc']:.4f}", level=2)
         if "histopath_auroc" in test_metrics and not math.isnan(test_metrics["histopath_auroc"]):
-            self.log(f"Histopath AUROC: {test_metrics['histopath_auroc']:.4f}", level=1)
+            self.log(f"Histopath AUROC: {test_metrics['histopath_auroc']:.4f}", level=2)
 
-        # Print pseudo label metrics if available
-        if pseudo_metrics:
-            self.log(
-                f"Pseudo Label Accuracy: {pseudo_metrics['accuracy']:.2%}", level=1
-            )
-            self.log(f"Pseudo Label F1: {pseudo_metrics['f1_score']:.4f}", level=1)
-            self.log(
-                f"Worst Pseudo Group Accuracy (All): {pseudo_metrics['worst_group_accuracy']:.2%}",
-                level=1,
-            )
-            self.log(
-                f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}",
-                level=1,
-            )
-            if "difficult_node_accuracy" in pseudo_metrics:
-                self.log(
-                    f"Difficult Node Accuracy (DNA): {pseudo_metrics['difficult_node_accuracy']:.2%}",
-                    level=1,
-                )
-            if "difficult_node_f1" in pseudo_metrics:
-                self.log(
-                    f"Difficult Node F1 (DNF1): {pseudo_metrics['difficult_node_f1']:.4f}",
-                    level=1,
-                )
-            self.log(
-                f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}",
-                level=1,
-            )
-            # Log node sizes if available
-            if "node_sizes" in pseudo_metrics:
-                sizes_str = ", ".join(
-                    f"N{k}:{v}" for k, v in sorted(pseudo_metrics["node_sizes"].items())
-                )
-                self.log(f"Node Sizes: {sizes_str}", level=2)
-
-        # Print group-specific performance
+        # 4. Print group-specific performance breakdown
         if group_results is not None:
             self.log("\n--- Group-Specific Performance ---", level=1)
             for group_name, metrics in group_results["group_metrics"].items():
@@ -447,15 +429,35 @@ class NCTLogger:
                     acc_str += f", AUROC: {metrics['auroc']:.4f}"
                 self.log(f"  {group_name}: {acc_str}", level=1)
 
+        # 5. Print pseudo label metrics (routing quality - less important)
+        if pseudo_metrics:
+            self.log("\n--- Pseudo-Label Routing Metrics ---", level=2)
             self.log(
-                f"\nWorst-Group Accuracy: {group_results['summary']['worst_group_accuracy']:.2%}",
-                level=1,
+                f"Pseudo Label Accuracy: {pseudo_metrics['accuracy']:.2%}", level=2
             )
-            if "worst_group_auroc" in group_results["summary"]:
+            self.log(f"Pseudo Label F1: {pseudo_metrics['f1_score']:.4f}", level=2)
+            self.log(
+                f"Worst Pseudo Group Accuracy (All): {pseudo_metrics['worst_group_accuracy']:.2%}",
+                level=2,
+            )
+            self.log(
+                f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}",
+                level=2,
+            )
+            if "difficult_node_accuracy" in pseudo_metrics:
                 self.log(
-                    f"Worst-Group AUROC: {group_results['summary']['worst_group_auroc']:.4f}",
-                    level=1,
+                    f"Difficult Node Accuracy (DNA): {pseudo_metrics['difficult_node_accuracy']:.2%}",
+                    level=2,
                 )
+            if "difficult_node_f1" in pseudo_metrics:
+                self.log(
+                    f"Difficult Node F1 (DNF1): {pseudo_metrics['difficult_node_f1']:.4f}",
+                    level=2,
+                )
+            self.log(
+                f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}",
+                level=2,
+            )
 
         # Print trailing newline (matches old behavior)
         self.log("", level=1)

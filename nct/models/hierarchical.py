@@ -272,18 +272,22 @@ class HierarchicalClassifier(nn.Module):
     def get_trainable_parameters(self) -> Dict[str, list]:
         """
         Get trainable parameters grouped by component.
+
         Returns:
             Dict[str, list]: Dictionary with 'base' and 'heads' parameter lists
+                - 'base': backbone + parent_layers (frozen in Phase 1, base_lr in Phase 2)
+                - 'heads': output_heads only (trained in both phases with head_lr)
         """
+        # Base includes backbone and parent layers (both use base_lr in Phase 2)
         base_params = [p for p in self.base.parameters() if p.requires_grad]
-
-        # Include parent layers with heads in hierarchical modes
-        head_params = list(self.output_heads.parameters())
         if self.hierarchical != "none" and len(self.parent_layers) > 0:
-            # Both correct_label_routing use parent layers
             for parent_layer in self.parent_layers:
-                head_params.extend(parent_layer.parameters())
-        head_params = [p for p in head_params if p.requires_grad]
+                base_params.extend(
+                    p for p in parent_layer.parameters() if p.requires_grad
+                )
+
+        # Heads are only the current iteration's output heads
+        head_params = [p for p in self.output_heads.parameters() if p.requires_grad]
 
         return {"base": base_params, "heads": head_params}
 

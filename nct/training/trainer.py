@@ -30,8 +30,8 @@ class NCTTrainer:
     """
     Trainer for hierarchical models with two-phase training strategy.
 
-    Phase 1: Train classification heads with frozen backbone.
-    Phase 2: Fine-tune the entire model (backbone + heads).
+    Phase 1: Train output heads with frozen base (backbone + parent layers).
+    Phase 2: Fine-tune the entire model (base with base_lr, output heads with head_lr).
 
     Supports early stopping, learning rate scheduling, and mixed precision training.
     """
@@ -90,8 +90,8 @@ class NCTTrainer:
             train_loader: Training data loader.
             val_loader: Validation data loader.
             epochs: Number of epochs to train.
-            base_lr: Learning rate for backbone.
-            head_lr: Learning rate for classification heads.
+            base_lr: Learning rate for backbone and parent layers.
+            head_lr: Learning rate for output heads.
             class_weights: Class weights for loss computation.
         Returns:
             Dictionary containing training results:
@@ -207,12 +207,12 @@ class NCTTrainer:
         total_epochs: int = None,
     ) -> Dict[str, Any]:
         """
-        Execute phase 1 training with frozen backbone.
+        Execute phase 1 training with frozen base (backbone + parent layers).
         Args:
             train_loader: Training data loader.
             val_loader: Validation data loader.
             epochs: Number of epochs for this phase.
-            head_lr: Learning rate for classification heads.
+            head_lr: Learning rate for output heads.
             class_weights: Training class weights.
             val_class_weights: Validation class weights.
             total_epochs: Total epochs across both phases (for logging).
@@ -223,13 +223,19 @@ class NCTTrainer:
             return {"epochs": 0, "train_losses": [], "val_losses": []}
 
         self.logger.phase_start(
-            "Phase 1: Training output heads (frozen base)", 1, epochs
+            "Phase 1: Training output heads (backbone + parent layers frozen)", 1, epochs
         )
 
+        # Freeze backbone
         for param in self.model.base.parameters():
             param.requires_grad = False
 
-        # Get head parameters (includes parent layers in hierarchical mode)
+        # Freeze parent layers (hierarchical mode only)
+        for parent_layer in self.model.parent_layers:
+            for param in parent_layer.parameters():
+                param.requires_grad = False
+
+        # Get head parameters (output_heads only, base and parent_layers are frozen)
         model_params = self.model.get_trainable_parameters()
 
         optimizer_config = OptimizerConfig(**self.config.get("optimizer"))
@@ -280,8 +286,8 @@ class NCTTrainer:
             train_loader: Training data loader.
             val_loader: Validation data loader.
             epochs: Number of epochs for this phase.
-            base_lr: Learning rate for backbone.
-            head_lr: Learning rate for classification heads.
+            base_lr: Learning rate for backbone and parent layers.
+            head_lr: Learning rate for output heads.
             class_weights: Training class weights.
             val_class_weights: Validation class weights.
             total_epochs: Total epochs across both phases (for logging).
@@ -294,8 +300,14 @@ class NCTTrainer:
 
         self.logger.phase_start("Phase 2: Fine-tuning the full model", 2, epochs)
 
+        # Unfreeze backbone
         for param in self.model.base.parameters():
             param.requires_grad = True
+
+        # Unfreeze parent layers (hierarchical mode only)
+        for parent_layer in self.model.parent_layers:
+            for param in parent_layer.parameters():
+                param.requires_grad = True
 
         model_params = self.model.get_trainable_parameters()
         optimizer_config = OptimizerConfig(**self.config.get("optimizer"))

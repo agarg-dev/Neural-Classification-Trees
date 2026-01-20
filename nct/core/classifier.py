@@ -33,10 +33,10 @@ from ..training.trainer import NCTTrainer
 from ..utils.checkpoints import CheckpointManager
 from ..utils.device import get_device
 from ..utils.hierarchical import (
-    get_num_nodes,
-    get_nodes_per_class,
-    node_to_class,
     get_class_node_range,
+    get_nodes_per_class,
+    get_num_nodes,
+    node_to_class,
 )
 from ..utils.logger import NCTLogger
 from ..utils.seed import set_seed
@@ -102,6 +102,9 @@ class NCTClassifier:
         self.logger = NCTLogger(verbose=self.config.verbose, config=self.config)
         self._iteration_results = []
         self._prev_weights = None  # For weight change tracking
+        self._trained_nodes_mask = (
+            None  # Mask for nodes with training samples (used at inference)
+        )
 
     # ============================================================================
     # PUBLIC API
@@ -148,7 +151,14 @@ class NCTClassifier:
         y_train = extract_labels_from_dataset(X_train)
         y_val = extract_labels_from_dataset(X_val)
         self.model = self._run_iterative_training(
-            X_train, X_val, y_train, y_val, X_test, group_labels, dataset_name, test_subgroups
+            X_train,
+            X_val,
+            y_train,
+            y_val,
+            X_test,
+            group_labels,
+            dataset_name,
+            test_subgroups,
         )
         self._is_fitted = True
 
@@ -205,7 +215,9 @@ class NCTClassifier:
         # Sum probabilities for nodes belonging to each class
         class_probs = []
         for class_id in range(self.config.num_classes):
-            start_node, end_node = get_class_node_range(class_id, self.config.num_iterations)
+            start_node, end_node = get_class_node_range(
+                class_id, self.config.num_iterations
+            )
             class_raw = hierarchical_probs[:, start_node:end_node].sum(dim=1)
             class_probs.append(class_raw)
 
@@ -340,7 +352,9 @@ class NCTClassifier:
         )
 
         # Compute subgroup AUROC if test_subgroups provided
-        subgroup_auroc = calculate_subgroup_auroc(y_test_np, y_prob_positive, test_subgroups)
+        subgroup_auroc = calculate_subgroup_auroc(
+            y_test_np, y_prob_positive, test_subgroups
+        )
         if subgroup_auroc:
             basic_metrics.update(subgroup_auroc)
 
@@ -534,6 +548,7 @@ class NCTClassifier:
             self._iteration_results,
             filepath,
             self.config.verbose,
+            trained_nodes_mask=self._trained_nodes_mask,
         )
 
     @classmethod
@@ -608,13 +623,10 @@ class NCTClassifier:
             else:
                 class_weights, class_counts = None, None
 
-            # # Compute class weights for imbalanced data
-            # if self.config.use_class_weights:
-            #     class_weights, class_counts = compute_class_weights(
-            #         current_train_labels, num_nodes, return_counts=True
-            #     )
-            # else:
-            #     class_weights, class_counts = None, None
+            # Store mask of which nodes have training samples (for inference masking)
+            # This is updated each iteration; the final iteration's mask is used at inference
+            node_counts = torch.bincount(current_train_labels, minlength=num_nodes)
+            self._trained_nodes_mask = node_counts > 0
 
             self.logger.iteration_start(
                 i + 1,
@@ -622,7 +634,7 @@ class NCTClassifier:
                 num_nodes,
                 epochs_for_iter,
                 class_weights,
-                class_counts,
+                node_counts,  # Use raw counts for logging to show zeros
             )
 
             if i > 0:
@@ -785,11 +797,19 @@ class NCTClassifier:
             }
             self.logger.log_routing_statistics(routing_stats)
 
+        # Log section header for pseudo-label generation (node merges logged below)
+        if self.config.min_samples_per_node > 0:
+            next_iteration = len(self._iteration_results) + 1
+            self.logger.log(
+                f"\n--- Preparing Pseudo-Labels for Iteration {next_iteration} ---",
+                level=2,
+            )
+
         new_train_labels = self._compute_pseudo_labels_for_dataset(
-            train_preds, train_labels, is_difficult_train
+            train_preds, train_labels, is_difficult_train, dataset_name="train"
         )
         new_val_labels = self._compute_pseudo_labels_for_dataset(
-            val_preds, val_labels, is_difficult_val
+            val_preds, val_labels, is_difficult_val, dataset_name="val"
         )
 
         # Return validation predictions for pseudo-label metric computation
@@ -823,6 +843,7 @@ class NCTClassifier:
         predictions: torch.Tensor,
         labels: torch.Tensor,
         is_difficult: torch.Tensor,
+        dataset_name: str = "data",
     ) -> torch.Tensor:
         """
         Compute pseudo labels for routing to next iteration.
@@ -830,17 +851,45 @@ class NCTClassifier:
         Uses tree expansion formula: node_id * 2 + is_difficult
         This routes samples from N nodes to 2N child nodes.
 
+        If min_samples_per_node > 0, sparse difficult nodes (odd indices) are
+        merged into their easy siblings to prevent training instability.
+
         Args:
             predictions: Hierarchical predictions (node indices)
             labels: True binary labels
             is_difficult: Boolean tensor indicating difficult samples
+            dataset_name: Name of the dataset (train/val/test) for logging
 
         Returns:
             Pseudo labels for next iteration (range depends on current iteration)
         """
         # Route by label: all samples of a class stay within that class's hierarchy
         # Each class has its own easy/hard split
-        return labels * 2 + is_difficult.long()
+        proposed_labels = labels * 2 + is_difficult.long()
+
+        # Merge sparse difficult nodes into easy siblings if threshold is set
+        min_samples = self.config.min_samples_per_node
+        if min_samples > 0:
+            num_nodes = proposed_labels.max().item() + 1
+            counts = torch.bincount(proposed_labels, minlength=num_nodes)
+
+            # Difficult nodes are odd indices (1, 3, 5, 7, ...)
+            # Merge them into easy sibling (node - 1) if below threshold
+            for difficult_node in range(1, num_nodes, 2):
+                if counts[difficult_node] < min_samples:
+                    mask = proposed_labels == difficult_node
+                    num_merged = mask.sum().item()
+                    if num_merged > 0:
+                        proposed_labels[mask] = difficult_node - 1
+                        # Log the merge if verbose
+                        if self.config.verbose >= 2:
+                            self.logger.log(
+                                f"    Merged node {difficult_node} ({num_merged} samples) "
+                                f"into node {difficult_node - 1} [{dataset_name}]",
+                                level=2,
+                            )
+
+        return proposed_labels
 
     def _determine_difficult_samples(
         self,
@@ -947,6 +996,10 @@ class NCTClassifier:
     ) -> torch.Tensor:
         """
         Get hierarchical node predictions from model.
+
+        If min_samples_per_node > 0 and _trained_nodes_mask is set, masks out
+        untrained nodes (sets their logits to -inf) before taking argmax.
+
         Args:
             dataloader: DataLoader to generate predictions for.
             model: Model to use for predictions. If None, uses self.model.
@@ -959,10 +1012,25 @@ class NCTClassifier:
         model.eval()
         all_predictions = []
 
+        # Check if we should apply masking for untrained nodes
+        apply_mask = (
+            self.config.min_samples_per_node > 0
+            and self._trained_nodes_mask is not None
+        )
+
         with torch.no_grad():
             for images, _ in dataloader:
                 images = images.to(self.device)
                 outputs = model(images)
+
+                # Mask out untrained nodes (set their logits to -inf so argmax ignores them)
+                if apply_mask:
+                    mask = self._trained_nodes_mask.to(outputs.device)
+                    # Only mask if we have fewer trained nodes than total outputs
+                    if len(mask) == outputs.shape[1]:
+                        outputs = outputs.clone()
+                        outputs[:, ~mask] = float("-inf")
+
                 predictions = torch.argmax(outputs, dim=1)
                 all_predictions.append(predictions.cpu())
 
@@ -973,6 +1041,10 @@ class NCTClassifier:
     ) -> torch.Tensor:
         """
         Get hierarchical node probabilities from model.
+
+        If min_samples_per_node > 0 and _trained_nodes_mask is set, sets
+        probabilities of untrained nodes to 0.
+
         Args:
             dataloader: DataLoader to generate probabilities for.
             model: Model to use. If None, uses self.model.
@@ -985,12 +1057,25 @@ class NCTClassifier:
         model.eval()
         all_probabilities = []
 
+        # Check if we should apply masking for untrained nodes
+        apply_mask = (
+            self.config.min_samples_per_node > 0
+            and self._trained_nodes_mask is not None
+        )
+
         with torch.no_grad():
             for images, _ in dataloader:
                 images = images.to(self.device)
                 outputs = model(images)
                 probabilities = torch.sigmoid(outputs)
-                # probabilities = torch.softmax(outputs, dim=1)
+
+                # Zero out probabilities for untrained nodes
+                if apply_mask:
+                    mask = self._trained_nodes_mask.to(probabilities.device)
+                    if len(mask) == probabilities.shape[1]:
+                        probabilities = probabilities.clone()
+                        probabilities[:, ~mask] = 0.0
+
                 all_probabilities.append(probabilities.cpu())
 
         return torch.cat(all_probabilities)
@@ -1078,7 +1163,11 @@ class NCTClassifier:
         y_test_np = y_test.cpu().numpy()
         class_predictions_np = class_predictions.cpu().numpy()
         # For binary, use prob of class 1; for multi-class, pass full probability matrix
-        class_prob_for_auroc = class_probabilities[:, 1] if self.config.num_classes == 2 else class_probabilities
+        class_prob_for_auroc = (
+            class_probabilities[:, 1]
+            if self.config.num_classes == 2
+            else class_probabilities
+        )
         hierarchical_predictions_np = hierarchical_predictions.cpu().numpy()
         group_labels_np = np.array(group_labels) if group_labels is not None else None
 
@@ -1089,32 +1178,15 @@ class NCTClassifier:
             f"\n--- Evaluation on Test Set after Iteration {iteration} ---", level=1
         )
 
-        # Track transitions between iterations
-        if iteration > 1 and len(self._iteration_results) > 0:
-            prev_result = self._iteration_results[-1]
-            transitions = compute_iteration_transitions(
-                prev_result["predictions"],
-                class_predictions_np,
-                y_test_np,
-                group_labels_np,
-            )
-            self.logger.log_transitions(
-                iteration,
-                iteration - 1,
-                transitions,
-                group_labels,
-                dataset_name,
-                group_names,
-            )
-
         # Generate pseudo labels for next iteration
         test_pseudo_labels = None
         if iteration < self.config.num_iterations:
-            # For simple architecture ("none"), use previous iteration's pseudo labels
-            if self.config.hierarchical_architecture == "none" and iteration > 1:
+            # For iteration > 1, use previous iteration's pseudo labels as base
+            # This ensures correct label range (e.g., 0-7 for iter 3, not 0-3)
+            if iteration > 1:
                 current_test_labels = torch.from_numpy(
                     self._iteration_results[-1]["test_pseudo_labels"]
-                ).to(self.device)
+                )
             else:
                 current_test_labels = y_test
 
@@ -1123,7 +1195,10 @@ class NCTClassifier:
                 model, X_test, current_test_labels, is_correct
             )
             test_pseudo_labels = self._compute_pseudo_labels_for_dataset(
-                hierarchical_predictions, current_test_labels, is_difficult
+                hierarchical_predictions,
+                current_test_labels,
+                is_difficult,
+                dataset_name="test",
             )
 
         # Store test results
@@ -1169,11 +1244,34 @@ class NCTClassifier:
         )
 
         # Compute subgroup AUROC if test_subgroups provided (e.g., ISIC dataset)
-        subgroup_auroc = calculate_subgroup_auroc(y_test_np, class_prob_for_auroc, test_subgroups)
+        subgroup_auroc = calculate_subgroup_auroc(
+            y_test_np, class_prob_for_auroc, test_subgroups
+        )
         if subgroup_auroc:
             basic_metrics.update(subgroup_auroc)
 
-        # Detailed analysis
+        # Log results (summary metrics first)
+        self.logger.log_evaluation_results(basic_metrics, pseudo_metrics, group_results)
+
+        # Track transitions between iterations
+        if iteration > 1 and len(self._iteration_results) > 1:
+            prev_result = self._iteration_results[-2]
+            transitions = compute_iteration_transitions(
+                prev_result["predictions"],
+                class_predictions_np,
+                y_test_np,
+                group_labels_np,
+            )
+            self.logger.log_transitions(
+                iteration,
+                iteration - 1,
+                transitions,
+                group_labels,
+                dataset_name,
+                group_names,
+            )
+
+        # Detailed node analysis (verbose, last)
         if group_labels_np is not None and self.config.verbose >= 2:
             analyze_hierarchical_nodes(
                 hierarchical_predictions,
@@ -1187,9 +1285,6 @@ class NCTClassifier:
                 if hasattr(self, "_class_names")
                 else None,
             )
-
-        # Log results
-        self.logger.log_evaluation_results(basic_metrics, pseudo_metrics, group_results)
 
         # Prepare summary
         training_time = (

@@ -22,6 +22,7 @@ Training Configuration:
 - max_class_weight: Maximum class weight cap (5 to 50)
 - skip_class_weights_iter1: Skip class weights in iteration 1 (True/False)
 - aux_loss_weight: Auxiliary loss weight (0.0 to 2.0)
+- min_samples_per_node: Minimum samples to create a difficult node (0, 5, 10, 20, 30, 50)
 
 Fixed hyperparameters:
 - num_iterations: 2
@@ -194,6 +195,11 @@ def objective(
         "skip_class_weights_iter1", [True, False]
     )
 
+    # Node Pruning
+    min_samples_per_node = trial.suggest_categorical(
+        "min_samples_per_node", [0, 5, 10, 20, 30, 50]
+    )
+
     # Auxiliary loss
     aux_loss_weight = trial.suggest_float("aux_loss_weight", 0.0, 2.0, step=0.1)
 
@@ -271,6 +277,7 @@ def objective(
         aux_loss_weight=aux_loss_weight,
         max_class_weight=max_class_weight,
         skip_class_weights_iter1=skip_class_weights_iter1,
+        min_samples_per_node=min_samples_per_node,
         num_workers=num_workers,
         seed=seed,
         use_class_weights=use_class_weights,
@@ -459,7 +466,9 @@ def main():
     attribution_dir = f"script/attributions/tune_narrow/{trial_id}"
 
     # Use same model_selection_criterion as during tuning
-    final_model_selection_criterion = "dna" if args.metric in ["dna", "dnf1"] else "auto"
+    final_model_selection_criterion = (
+        "dna" if args.metric in ["dna", "dnf1"] else "auto"
+    )
 
     # Create final classifier
     final_classifier = NCTClassifier(
@@ -484,6 +493,7 @@ def main():
         aux_loss_weight=best_params["aux_loss_weight"],
         max_class_weight=best_params["max_class_weight"],
         skip_class_weights_iter1=best_params["skip_class_weights_iter1"],
+        min_samples_per_node=best_params["min_samples_per_node"],
         seed=args.seed,
         use_class_weights=True,
         checkpoint_dir=checkpoint_dir,
@@ -557,7 +567,9 @@ def main():
         f.write("Best Hyperparameters from Optuna Study (tune_narrow)\n")
         f.write("=" * 60 + "\n\n")
         f.write(f"Optimization Metric: {args.metric.upper()}\n")
-        f.write(f"Validation Pseudo-Label {args.metric.upper()}: {study.best_trial.value:.4f}\n")
+        f.write(
+            f"Validation Pseudo-Label {args.metric.upper()}: {study.best_trial.value:.4f}\n"
+        )
         f.write(f"Test Accuracy: {test_results['basic_metrics']['accuracy']:.4f}\n")
         if "group_metrics" in test_results:
             f.write(
