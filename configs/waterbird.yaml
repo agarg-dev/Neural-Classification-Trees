@@ -1,0 +1,72 @@
+# NCT Configuration for Waterbird Dataset
+
+# Training parameters
+num_iterations: 3
+epochs_per_iteration: [1, 100, 100]
+batch_size: 128
+seed: 42
+
+# Model architecture
+backbone: resnet50
+pretrained: true
+head_type: mlp
+head_hidden_dim: 96
+head_dropout: 0.1
+
+# Learning rates
+initial_base_lr: 2.0e-05
+initial_head_lr: 1.0e-05
+lr_decay_factor: 2.25
+
+# Optimizer configuration
+optimizer:
+    type: adamw
+    weight_decay: 0.5
+    betas: [0.9, 0.999]
+
+# Scheduler configuration
+scheduler:
+    type: plateau
+    eta_min: 1.0e-06
+    patience: 13
+    factor: 0.1
+
+# Loss and regularization
+use_class_weights: true
+max_class_weight: 40.0
+min_samples_per_node: 10
+skip_class_weights_iter1: true
+regularization_type: l2
+aux_loss_weight: 0.3
+node_balanced_sampling: false
+
+# Training phases
+phase1_epochs_ratio: [1, 1, 1]
+phase1_patience: 15
+phase2_patience: 15
+early_stopping: true
+model_selection_criterion: auto
+
+# Routing strategy
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+
+# Data parameters
+image_size: 224
+num_workers: 8
+pin_memory: true
+
+# Logging
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+# Wandb configuration
+wandb_enabled: false
+wandb_project: nct
+wandb_tags: [waterbirds, resnet50]
+
+# Checkpoint settings
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions
