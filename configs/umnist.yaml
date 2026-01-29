@@ -46,7 +46,7 @@ lambda_l1: 1.0e-05
 aux_loss_weight: 1
 
 # Training phases
-phase1_epochs_ratio: [1, 1, 1]
+phase1_epochs_ratio: [1, 0.5, 0.5]
 phase1_patience: 10
 phase2_patience: 10
 early_stopping: true
@@ -75,3 +75,4 @@ wandb_tags: [umnist, lenet5]
 save_iteration_checkpoints: true
 checkpoint_dir: ./checkpoints
 attribution_dir: ./attributions
+
