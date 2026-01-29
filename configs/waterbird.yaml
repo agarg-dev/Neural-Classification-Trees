@@ -41,7 +41,7 @@ aux_loss_weight: 0.3
 node_balanced_sampling: false
 
 # Training phases
-phase1_epochs_ratio: [1, 1, 1]
+phase1_epochs_ratio: [0.5, 0.25, 0.5]
 phase1_patience: 15
 phase2_patience: 15
 early_stopping: true
@@ -70,3 +70,4 @@ wandb_tags: [waterbirds, resnet50]
 save_iteration_checkpoints: true
 checkpoint_dir: ./checkpoints
 attribution_dir: ./attributions
+
