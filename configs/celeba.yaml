@@ -39,7 +39,7 @@ lambda_l1: 0.0
 aux_loss_weight: 0.5
 
 # Training phases
-phase1_epochs_ratio: [1, 1, 1]
+phase1_epochs_ratio: [1, 0.3, 0.3]
 phase1_patience: 8
 phase2_patience: 8
 early_stopping: true
@@ -69,3 +69,4 @@ wandb_tags: [celeba, blond-hair, resnet50]
 save_iteration_checkpoints: true
 checkpoint_dir: ./checkpoints
 attribution_dir: ./attributions
+
