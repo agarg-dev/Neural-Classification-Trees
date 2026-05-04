@@ -1,3 +1,4 @@
+
 """
 Attribution Visualization Module using Captum.
 Handles model interpretation, visualization, and faithfulness metric evaluation.
@@ -14,7 +15,7 @@ from torch.utils.data import Dataset, Subset
 
 try:
     from captum.attr import (
-        LayerGradCam, GuidedGradCam, LayerConductance,
+        LayerGradCam, GuidedGradCam, LayerConductance, 
         LayerIntegratedGradients, LayerGradientXActivation,
         Saliency, InputXGradient, DeepLift, GuidedBackprop, Occlusion,
         NoiseTunnel, visualization as viz
@@ -32,12 +33,12 @@ from ..evaluation.sampling import collect_node_samples, collect_transition_sampl
 
 # --- Method Groups ---
 LAYER_METHODS = [
-    "layer_gradcam", "layer_conductance",
+    "layer_gradcam", "layer_conductance", 
     "layer_integrated_gradients", "layer_gradient_x_activation"
 ]
 
 PIXEL_METHODS = [
-    "saliency", "guided_gradcam", "guided_backprop",
+    "saliency", "guided_gradcam", "guided_backprop", 
     "input_x_gradient", "deeplift", "occlusion"
 ]
 
@@ -46,10 +47,9 @@ ALL_METHODS = LAYER_METHODS + PIXEL_METHODS
 AttributionMethod = Literal[
     "layer_gradcam", "guided_gradcam", "layer_conductance",
     "layer_integrated_gradients", "layer_gradient_x_activation",
-    "saliency", "input_x_gradient", "deeplift",
+    "saliency", "input_x_gradient", "deeplift", 
     "guided_backprop", "occlusion"
 ]
-
 
 class CaptumModelAdapter(nn.Module):
     """Wraps model to ensure forward pass returns a single tensor."""
@@ -62,8 +62,6 @@ class CaptumModelAdapter(nn.Module):
         if isinstance(out, tuple):
             return out[0]
         return out
-
-
 class CaptumAttribution:
     def __init__(
         self,
@@ -76,7 +74,7 @@ class CaptumAttribution:
         attribution_method: AttributionMethod = "layer_gradcam"
     ):
         if not CAPTUM_AVAILABLE:
-            raise ImportError("captum required. Install with: pip install captum")
+             raise ImportError("captum required. Install with: pip install captum")
         self.model = model
         self.device = device
         self.checkpoint_loader = checkpoint_loader
@@ -87,16 +85,7 @@ class CaptumAttribution:
         self._current_seed = None
 
     def _safe_load_checkpoint(self, checkpoint_path: str, context: str = "") -> Optional[nn.Module]:
-        """
-        Safely load a checkpoint, handling corrupted or missing files.
-
-        Args:
-            checkpoint_path: Path to the checkpoint file
-            context: Context string for error messages (e.g., "iteration 2")
-
-        Returns:
-            Loaded model or None if loading failed
-        """
+        """Load a checkpoint, returning None if missing or corrupted."""
         if not checkpoint_path:
             print(f"  Warning: No checkpoint path provided{' for ' + context if context else ''}, skipping.")
             return None
@@ -110,23 +99,28 @@ class CaptumAttribution:
             if any(kw in error_str for kw in ['corrupted', 'invalid header', 'nonetype', 'seek']):
                 print(f"  Warning: Checkpoint corrupted{' for ' + context if context else ''}: {checkpoint_path}")
                 return None
-            raise  # Re-raise unexpected errors
+            raise
 
     def _get_target_layer(self, model: nn.Module) -> nn.Module:
-        """Heuristic to find the last convolutional layer."""
-        # ResNet backbone
+        """Find the last convolutional layer in the backbone."""
         if hasattr(model, 'base') and hasattr(model.base, 'layer4'):
             return model.base.layer4[-1]
-        # LeNet5 backbone - use conv2 as the last conv layer
         if hasattr(model, 'base') and hasattr(model.base, 'conv2'):
             return model.base.conv2
-        raise ValueError("Could not detect target layer. Model must have 'base.layer4' (ResNet) or 'base.conv2' (LeNet5).")
+        if hasattr(model, 'base') and hasattr(model.base, 'convnet'):
+            last_conv = None
+            for m in model.base.convnet:
+                if isinstance(m, nn.Conv2d):
+                    last_conv = m
+            if last_conv is not None:
+                return last_conv
+        raise ValueError(
+            "Could not detect target layer. Model must have 'base.layer4' (ResNet), "
+            "'base.conv2' (LeNet5), or 'base.convnet' (LeNet4)."
+        )
 
     def _fix_relu_inplace(self, model: nn.Module):
-        """
-        DeepLIFT crashes if ReLUs are inplace=True.
-        This recursively changes them to inplace=False.
-        """
+        """Set all ReLUs to inplace=False (DeepLIFT requires non-inplace)."""
         for name, module in model.named_modules():
             if isinstance(module, nn.ReLU):
                 module.inplace = False
@@ -136,7 +130,6 @@ class CaptumAttribution:
         wrapped_model = CaptumModelAdapter(model)
         wrapped_model.eval()
 
-        # Identify methods that require access to internal layers
         layer_methods = [
             "layer_gradcam", "layer_conductance",
             "layer_integrated_gradients", "layer_gradient_x_activation",
@@ -145,7 +138,6 @@ class CaptumAttribution:
 
         target_layer = self._get_target_layer(model) if method in layer_methods else None
 
-        # --- Layer Methods ---
         if method == "layer_gradcam":
             return LayerGradCam(wrapped_model, target_layer)
         elif method == "layer_conductance":
@@ -157,31 +149,30 @@ class CaptumAttribution:
         elif method == "guided_gradcam":
             return GuidedGradCam(wrapped_model, target_layer)
 
-        # --- Input Methods ---
         elif method == "occlusion":
             return Occlusion(wrapped_model)
 
-        # --- Pixel Methods (wrapped in NoiseTunnel) ---
         base_explainer = None
         if method == "saliency":
             base_explainer = Saliency(wrapped_model)
         elif method == "input_x_gradient":
             base_explainer = InputXGradient(wrapped_model)
         elif method == "deeplift":
+            # DeepLIFT requires non-inplace ReLU
             self._fix_relu_inplace(wrapped_model)
             base_explainer = DeepLift(wrapped_model)
         elif method == "guided_backprop":
             base_explainer = GuidedBackprop(wrapped_model)
-
+        
         if base_explainer:
             return NoiseTunnel(base_explainer)
-
+        
         raise ValueError(f"Unsupported attribution method: {method}")
 
     def _compute_batch_attributions(self, explainer, batch_images, batch_targets):
-        """Compute attributions handling method-specific logic (upsampling/smoothing)."""
+        """Compute attributions, applying method-specific upsampling/smoothing."""
 
-        # 1. Layer Methods: Output is small (e.g. 7x7). Must upsample.
+        # Layer methods produce low-res maps; must upsample to image size
         if isinstance(explainer, (LayerGradCam, LayerConductance,
                                   LayerIntegratedGradients, LayerGradientXActivation)):
             attributions = explainer.attribute(batch_images, target=batch_targets)
@@ -189,26 +180,22 @@ class CaptumAttribution:
             if attributions.dim() == 4 and attributions.shape[1] > 1:
                 attributions = attributions.sum(dim=1, keepdim=True)
                 attributions = torch.relu(attributions)
-
+            
             attributions = torch.nn.functional.interpolate(
                 attributions, size=batch_images.shape[-2:], mode='bilinear', align_corners=False
             )
 
-        # 2. Guided GradCAM: High-res natively.
         elif isinstance(explainer, GuidedGradCam):
             attributions = explainer.attribute(batch_images, target=batch_targets)
 
-        # 3. Pixel Methods: Use NoiseTunnel.
         elif isinstance(explainer, NoiseTunnel):
             attributions = explainer.attribute(
                 batch_images, target=batch_targets, nt_type='smoothgrad_sq', nt_samples=10, stdevs=0.15
             )
 
-        # 4. Occlusion: Use adaptive window size based on image dimensions.
         elif isinstance(explainer, Occlusion):
             num_channels = batch_images.shape[1]
             img_size = batch_images.shape[-1]
-            # Use smaller window for smaller images (e.g., 28x28 MNIST)
             if img_size <= 32:
                 window_size = 4
                 stride = 1
@@ -257,7 +244,7 @@ class CaptumAttribution:
 
             print(f"  Iteration {iteration} ({len(indices)} samples)...")
             infid_scores = []
-
+            
             heavy_methods = ['deeplift', 'layer_integrated_gradients']
             batch_size = 2 if self.attribution_method in heavy_methods else 16
 
@@ -298,14 +285,12 @@ class CaptumAttribution:
         return results
 
     def _denorm(self, tensor):
-        """Denormalize tensor for visualization. Auto-detects grayscale vs RGB."""
+        """Denormalize tensor for visualization (auto-detect grayscale vs RGB)."""
         num_channels = tensor.shape[1]
         if num_channels == 1:
-            # Grayscale (MNIST/UMNIST)
             mean = torch.tensor([0.1307], device=tensor.device).view(1, 1, 1, 1)
             std = torch.tensor([0.3081], device=tensor.device).view(1, 1, 1, 1)
         else:
-            # RGB (ImageNet normalization)
             mean = torch.tensor([0.485, 0.456, 0.406], device=tensor.device).view(1, 3, 1, 1)
             std = torch.tensor([0.229, 0.224, 0.225], device=tensor.device).view(1, 3, 1, 1)
         out = tensor * std + mean
@@ -314,10 +299,10 @@ class CaptumAttribution:
     def _generate_attribution(self, explainer, input_tensor, target):
         input_tensor.requires_grad_(True)
         target_tensor = torch.tensor([int(target)], device=self.device)
-
+        
         attr = self._compute_batch_attributions(explainer, input_tensor, target_tensor)
         attr = attr.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-
+        
         if attr.shape[2] == 3:
             if self.attribution_method in LAYER_METHODS:
                 attr = np.mean(attr, axis=2, keepdims=True)
@@ -328,7 +313,7 @@ class CaptumAttribution:
     def _safe_visualize(self, attr, img_tensor, fig, ax, title):
         img_denorm = self._denorm(img_tensor.unsqueeze(0)).squeeze(0).permute(1, 2, 0).cpu().numpy()
 
-        # Convert grayscale to RGB for visualization (Captum expects RGB)
+        # Captum expects RGB; broadcast grayscale
         if img_denorm.shape[2] == 1:
             img_rgb = np.repeat(img_denorm, 3, axis=2)
         else:
@@ -373,7 +358,6 @@ class CaptumAttribution:
             ax.imshow(img_rgb)
 
     def _create_node_grid(self, dataset, node_samples, iteration, explainer):
-        # Filter out empty nodes - only show nodes that have samples
         non_empty_nodes = {k: v for k, v in node_samples.items() if len(v) > 0}
         if not non_empty_nodes:
             return plt.figure()
@@ -390,6 +374,7 @@ class CaptumAttribution:
         fig.suptitle(f"Iteration {iteration} - Node Attributions", fontsize=16, y=0.98)
 
         for row_idx, (node_idx, sample_indices) in enumerate(sorted(non_empty_nodes.items())):
+            # Get row label once (shared for all images in the row)
             row_label = get_node_label(node_idx, iteration, self.class_names, self.hierarchical)
 
             for col_idx in range(max_samples):
@@ -399,21 +384,26 @@ class CaptumAttribution:
                     img_t, _ = dataset[idx]
                     input_t = img_t.unsqueeze(0).to(self.device)
                     attr = self._generate_attribution(explainer, input_t, node_idx)
+
+                    # Don't add title to each image - use shared row label instead
                     self._safe_visualize(attr, img_t, fig, ax, "")
                 else:
                     ax.axis('off')
 
+                # Remove individual titles
                 ax.set_title("")
 
+            # Add shared row label on the left side (only first column gets the label)
             axes[row_idx, 0].set_ylabel(
                 row_label, fontsize=10, rotation=0,
                 labelpad=80, ha='right', va='center'
             )
 
+        # Adjust layout to prevent title overlap and make room for row labels
         plt.tight_layout(rect=[0.12, 0, 1, 0.95])
         return fig
 
-    def _create_transition_grid(self, dataset, selected_indices, prev_result, curr_result,
+    def _create_transition_grid(self, dataset, selected_indices, prev_result, curr_result, 
                                 prev_iter, curr_iter, prev_explainer, curr_explainer, t_type):
         num_samples = len(selected_indices)
         fig, axes = plt.subplots(num_samples, 2, figsize=(8, num_samples * 3))
@@ -424,12 +414,14 @@ class CaptumAttribution:
             img_t, _ = dataset[idx]
             input_t = img_t.unsqueeze(0).to(self.device)
 
+            # Prev
             prev_node = prev_result['hierarchical_predictions'][idx]
             prev_attr = self._generate_attribution(prev_explainer, input_t, prev_node)
             if prev_attr.ndim == 2: prev_attr = prev_attr[..., np.newaxis]
             prev_lbl = f"Iter {prev_iter}: {get_node_label(prev_node, prev_iter, self.class_names, self.hierarchical)}"
             self._safe_visualize(prev_attr, img_t, fig, axes[row_idx, 0], prev_lbl)
 
+            # Curr
             curr_node = curr_result['hierarchical_predictions'][idx]
             curr_attr = self._generate_attribution(curr_explainer, input_t, curr_node)
             if curr_attr.ndim == 2: curr_attr = curr_attr[..., np.newaxis]
@@ -438,12 +430,12 @@ class CaptumAttribution:
         plt.tight_layout()
         return fig
 
-    def _save_transition(self, dataset, indices, num_samples, prev_result, curr_result,
+    def _save_transition(self, dataset, indices, num_samples, prev_result, curr_result, 
                         prev_iter, curr_iter, prev_explainer, curr_explainer, t_type, save_dir):
         if len(indices) == 0: return
         rng = np.random.RandomState(self._current_seed)
         selected = rng.choice(indices, size=min(num_samples, len(indices)), replace=False)
-        fig = self._create_transition_grid(dataset, selected, prev_result, curr_result,
+        fig = self._create_transition_grid(dataset, selected, prev_result, curr_result, 
                                          prev_iter, curr_iter, prev_explainer, curr_explainer, t_type)
         fig.savefig(os.path.join(save_dir, f"transitions_{prev_iter}_to_{curr_iter}_{t_type}.png"), dpi=150, bbox_inches='tight')
         plt.close(fig)
@@ -460,6 +452,7 @@ class CaptumAttribution:
         plt.close(fig)
         print(f"  Saved iteration {iteration} node visualizations")
 
+        # Clean up to prevent memory accumulation
         del model, explainer
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
@@ -485,14 +478,14 @@ class CaptumAttribution:
             if len(learn) > 0: self._save_transition(dataset, learn, num_samples, prev, curr, i+1, i+2, prev_explainer, curr_explainer, "Learning", save_dir)
 
     def generate_all_visualizations(
-        self,
-        dataset,
-        iteration_results,
-        save_dir="./attributions",
-        num_per_node=5,
-        num_transitions=5,
+        self, 
+        dataset, 
+        iteration_results, 
+        save_dir="./attributions", 
+        num_per_node=5, 
+        num_transitions=5, 
         seed=None,
-        methods: Union[str, List[str]] = None
+        methods: Union[str, List[str]] = None 
     ):
         os.makedirs(save_dir, exist_ok=True)
         if seed is not None: set_seed(seed)
@@ -507,27 +500,27 @@ class CaptumAttribution:
             elif methods == "all_layer": methods_to_run = LAYER_METHODS
             elif methods == "all_pixel": methods_to_run = PIXEL_METHODS
             else: methods_to_run = [methods]
-
-        print(f"\nRunning Batch Visualization for: {methods_to_run}")
+        
+        print(f"\n>>> Running Batch Visualization for: {methods_to_run}")
 
         for method in methods_to_run:
-            print(f"\n{'='*50}")
+            print(f"\n" + "="*50)
             print(f"STARTING METHOD: {method}")
             print("="*50)
-
+            
             self.attribution_method = method
             method_save_dir = os.path.join(save_dir, method)
             os.makedirs(method_save_dir, exist_ok=True)
 
             faith_results = self._evaluate_faithfulness_metrics(dataset, iteration_results)
             self._save_faithfulness_metrics(faith_results, method_save_dir)
-
+            
             for iter_idx, result in enumerate(iteration_results):
                 self._generate_node_visualizations(dataset, result, iter_idx + 1, num_per_node, method_save_dir)
-
+            
             labels = extract_labels_from_dataset(dataset).numpy()
             self._generate_transitions(dataset, iteration_results, labels, num_transitions, method_save_dir)
-
+            
             print(f"Finished {method}. Results in: {method_save_dir}")
 
         print(f"\nAll requested methods completed.")

@@ -1,7 +1,7 @@
 """Dataset preparation and metadata loading."""
 
 import os
-from typing import Dict, Optional
+from typing import Dict
 
 import pandas as pd
 
@@ -22,12 +22,14 @@ def load_waterbird_metadata(data_dir: str, config: DatasetConfig) -> Dict:
     test_df = metadata_df[metadata_df["split"] == 2]
 
     group_test = test_df["y"].values * 2 + test_df["place"].values
+    group_val = val_df["y"].values * 2 + val_df["place"].values
 
     return {
         "train_df": train_df,
         "val_df": val_df,
         "test_df": test_df,
         "group_test": group_test,
+        "group_val": group_val,
         "root_dir": dataset_path,
     }
 
@@ -43,7 +45,6 @@ def load_celeba_metadata(data_dir: str, config: DatasetConfig) -> Dict:
 
     metadata_df = pd.merge(attr_df, split_df, on="image_id")
 
-    # Convert labels from -1/1 to 0/1
     metadata_df["y"] = ((metadata_df["Blond_Hair"] + 1) // 2).astype(int)
     metadata_df["male"] = ((metadata_df["Male"] + 1) // 2).astype(int)
     metadata_df["img_filename"] = "img_align_celeba/" + metadata_df["image_id"]
@@ -53,12 +54,14 @@ def load_celeba_metadata(data_dir: str, config: DatasetConfig) -> Dict:
     test_df = metadata_df[metadata_df["partition"] == 2]
 
     group_test = test_df["y"].values * 2 + test_df["male"].values
+    group_val = val_df["y"].values * 2 + val_df["male"].values
 
     return {
         "train_df": train_df,
         "val_df": val_df,
         "test_df": test_df,
         "group_test": group_test,
+        "group_val": group_val,
         "root_dir": dataset_path,
     }
 
@@ -71,7 +74,6 @@ def load_isic_metadata(data_dir: str, config: DatasetConfig) -> Dict:
 
     metadata_df = pd.read_csv(os.path.join(dataset_path, "labels.csv"))
 
-    # Filter to only benign/malignant (exclude indeterminate)
     metadata_df = metadata_df[
         metadata_df["benign_malignant"].isin(["benign", "malignant"])
     ]
@@ -81,7 +83,6 @@ def load_isic_metadata(data_dir: str, config: DatasetConfig) -> Dict:
         "ISIC_2019_Training_Input/" + metadata_df["Image Index"]
     )
 
-    # Histopathology-confirmed diagnosis indicator
     metadata_df["histopathology"] = (
         metadata_df["diagnosis_confirm_type"] == "histopathology"
     ).astype(int)
@@ -91,8 +92,8 @@ def load_isic_metadata(data_dir: str, config: DatasetConfig) -> Dict:
     test_df = metadata_df[metadata_df["fold"] == "test"]
 
     group_test = test_df["y"].values * 2 + test_df["patch"].values
+    group_val = val_df["y"].values * 2 + val_df["patch"].values
 
-    # Subgroups for AUROC evaluation (boolean masks)
     val_subgroups = {
         "non_patch": val_df["patch"].values == 0,
         "histopath": val_df["histopathology"].values == 1,
@@ -107,6 +108,7 @@ def load_isic_metadata(data_dir: str, config: DatasetConfig) -> Dict:
         "val_df": val_df,
         "test_df": test_df,
         "group_test": group_test,
+        "group_val": group_val,
         "val_subgroups": val_subgroups,
         "test_subgroups": test_subgroups,
         "root_dir": dataset_path,
@@ -125,14 +127,45 @@ def load_umnist_metadata(data_dir: str, config: DatasetConfig) -> Dict:
     val_df = metadata_df[metadata_df["split"] == "val"]
     test_df = metadata_df[metadata_df["split"] == "test"]
 
-    # Group: y * 2 + is_digit_8
     group_test = test_df["y"].values * 2 + test_df["is_digit_8"].values
+    group_val = val_df["y"].values * 2 + val_df["is_digit_8"].values
 
     return {
         "train_df": train_df,
         "val_df": val_df,
         "test_df": test_df,
         "group_test": group_test,
+        "group_val": group_val,
+        "root_dir": dataset_path,
+    }
+
+
+def load_cmnist_metadata(data_dir: str, config: DatasetConfig) -> Dict:
+    """Load CMNIST (Colored MNIST) dataset metadata."""
+    dataset_path = os.path.join(data_dir, config.data_subdir)
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"CMNIST dataset not found at {dataset_path}")
+
+    metadata_df = pd.read_csv(os.path.join(dataset_path, "metadata.csv"))
+
+    train_df = metadata_df[metadata_df["split"] == "train"]
+    val_df = metadata_df[metadata_df["split"] == "val"]
+    test_df = metadata_df[metadata_df["split"] == "test"]
+
+    num_colors = config.num_classes
+    if "color" in metadata_df.columns:
+        group_test = test_df["y"].values * num_colors + test_df["color"].values
+        group_val = val_df["y"].values * num_colors + val_df["color"].values
+    else:
+        group_test = test_df["y"].values
+        group_val = val_df["y"].values
+
+    return {
+        "train_df": train_df,
+        "val_df": val_df,
+        "test_df": test_df,
+        "group_test": group_test,
+        "group_val": group_val,
         "root_dir": dataset_path,
     }
 
@@ -142,6 +175,7 @@ METADATA_LOADERS = {
     "celeba": load_celeba_metadata,
     "isic": load_isic_metadata,
     "umnist": load_umnist_metadata,
+    "cmnist": load_cmnist_metadata,
 }
 
 
@@ -150,17 +184,7 @@ def prepare_dataset(
     dataset_name: str,
     cache_images_in_memory: bool = False,
 ):
-    """
-    Prepare dataset with appropriate transforms.
-
-    Args:
-        data_dir: Root data directory.
-        dataset_name: Dataset name ('waterbird', 'celeba', 'isic').
-        cache_images_in_memory: If True, cache PIL images in RAM (causes OOM on large datasets).
-
-    Returns:
-        Dictionary with train/val/test datasets, group labels, and config.
-    """
+    """Prepare train/val/test datasets with the per-dataset transforms applied."""
     dataset_name = dataset_name.lower()
 
     if dataset_name not in DATASET_REGISTRY:
@@ -173,7 +197,6 @@ def prepare_dataset(
 
     metadata = loader_fn(data_dir, config)
 
-    # Use PIL-based transforms
     train_transform = create_transforms(config, is_training=True)
     val_test_transform = create_transforms(config, is_training=False)
 
@@ -209,6 +232,7 @@ def prepare_dataset(
         "val_dataset": val_dataset,
         "test_dataset": test_dataset,
         "group_test": metadata["group_test"],
+        "group_val": metadata.get("group_val"),
         "val_subgroups": metadata.get("val_subgroups"),
         "test_subgroups": metadata.get("test_subgroups"),
         "config": config,

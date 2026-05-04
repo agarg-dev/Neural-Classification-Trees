@@ -8,6 +8,7 @@ from .core.classifier import NCTClassifier
 from .core.config import NCTConfig, OptimizerConfig, SchedulerConfig
 
 __version__ = "0.1.0"
+__author__ = "NCT Team"
 
 __all__ = [
     "NCTClassifier",

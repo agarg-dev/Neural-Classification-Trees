@@ -18,25 +18,12 @@ def create_optimizer(
     learning_rate: float = 1e-3,
     regularization_type: str = 'l2'
 ) -> optim.Optimizer:
-    """
-    Create an optimizer with specified parameters.
-
-    Args:
-        parameters: Model parameters or parameter groups
-        config: OptimizerConfig object with all hyperparameters
-        learning_rate: Learning rate (overrides config if provided)
-        regularization_type: Type of regularization ('l1', 'l2', 'elastic_net', 'none')
-
-    Returns:
-        torch.optim.Optimizer: Configured optimizer
-    """
+    """Create an optimizer with specified parameters."""
     optimizer_type = config.type.lower()
 
-    # Determine weight_decay based on regularization type
-    # L2 and elastic_net use optimizer's weight_decay, L1 and none don't
     if regularization_type in ['l2', 'elastic_net']:
         weight_decay = config.weight_decay
-    else:  # 'l1' or 'none'
+    else:
         weight_decay = 0.0
 
     if optimizer_type == 'adamw':
@@ -80,21 +67,7 @@ def create_two_stage_optimizer(
     config: OptimizerConfig,
     regularization_type: str = 'l2'
 ) -> optim.Optimizer:
-    """
-    Create optimizer with different learning rates for base and output heads.
-
-    Args:
-        model_parameters: Dict with 'base' and 'heads' parameter lists
-            - 'base': backbone + parent_layers (use base_lr)
-            - 'heads': output_heads only (use head_lr)
-        base_lr: Learning rate for backbone and parent layers
-        head_lr: Learning rate for output heads
-        config: OptimizerConfig object with all hyperparameters
-        regularization_type: Type of regularization ('l1', 'l2', 'elastic_net', 'none')
-
-    Returns:
-        torch.optim.Optimizer: Configured optimizer with parameter groups
-    """
+    """Create optimizer with different learning rates for base and output heads."""
     param_groups = [
         {'params': model_parameters['base'], 'lr': base_lr},
         {'params': model_parameters['heads'], 'lr': head_lr}
@@ -102,7 +75,7 @@ def create_two_stage_optimizer(
     return create_optimizer(
         param_groups,
         config=config,
-        learning_rate=head_lr,  # Default LR (will be overridden by param groups)
+        learning_rate=head_lr,
         regularization_type=regularization_type
     )
 
@@ -114,23 +87,7 @@ def create_scheduler(
     num_epochs: Optional[int] = None,
     steps_per_epoch: Optional[int] = None
 ) -> Optional[Any]:
-    """
-    Create a learning rate scheduler with dynamic hyperparameter calculation.
-
-    Args:
-        optimizer: PyTorch optimizer
-        config: SchedulerConfig object with all hyperparameters
-        num_epochs: Number of epochs for this training phase (used for auto-calculation)
-        steps_per_epoch: Number of steps per epoch (used for step-based schedulers)
-
-    Returns:
-        Optional scheduler object
-
-    Notes:
-        - If num_epochs is provided, hyperparameters are auto-calculated based on training duration
-        - Config values are used as fallbacks if auto-calculation isn't possible
-        - For 'cosine_warmup', steps_per_epoch is required for auto-calculation
-    """
+    """Create a learning rate scheduler. Use -1 in config to auto-calculate from num_epochs."""
     scheduler_type = config.type.lower()
 
     if scheduler_type == 'none':
@@ -168,25 +125,13 @@ def adjust_learning_rate(
     decay_factor: float = 2.0,
     param_group_idx: Optional[int] = None
 ) -> None:
-    """
-    Manually adjust learning rate by dividing by decay factor.
-    Useful for NCT's between-iteration LR decay: current_base_lr /= lr_decay_factor
-    Args:
-        optimizer: PyTorch optimizer
-        decay_factor: Factor to divide learning rate by (e.g., 2.0 halves the LR)
-        param_group_idx: Specific parameter group to adjust (None for all groups)
-    Example:
-        # Decay only backbone LR between NCT iterations
-        adjust_learning_rate(optimizer, decay_factor=2.0, param_group_idx=0)
-    """
+    """Divide learning rate by decay_factor for one or all parameter groups."""
     if param_group_idx is not None:
-        # Adjust specific parameter group
         old_lr = optimizer.param_groups[param_group_idx]['lr']
         new_lr = old_lr / decay_factor
         optimizer.param_groups[param_group_idx]['lr'] = new_lr
         print(f"  Adjusted LR for group {param_group_idx}: {old_lr:.2e} -> {new_lr:.2e}")
     else:
-        # Adjust all parameter groups
         for i, param_group in enumerate(optimizer.param_groups):
             old_lr = param_group['lr']
             new_lr = old_lr / decay_factor
@@ -195,12 +140,6 @@ def adjust_learning_rate(
 
 
 def get_current_learning_rates(optimizer: optim.Optimizer) -> List[float]:
-    """
-    Get current learning rates from optimizer.
-    Args:
-        optimizer: PyTorch optimizer
-    Returns:
-        List[float]: Learning rates for each parameter group
-    """
+    """Get current learning rates from optimizer."""
     return [param_group['lr'] for param_group in optimizer.param_groups]
 

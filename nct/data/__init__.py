@@ -1,34 +1,39 @@
 """Data handling components."""
 
-# Configurations
-from .configs import CELEBA_CONFIG, DATASET_REGISTRY, ISIC_CONFIG, WATERBIRD_CONFIG
-
-# Core dataset classes
+from .configs import (
+    CELEBA_CONFIG,
+    CMNIST_CONFIG,
+    DATASET_REGISTRY,
+    ISIC_CONFIG,
+    UMNIST_CONFIG,
+    WATERBIRD_CONFIG,
+)
 from .datasets import GenericImageDataset, IterativeDataset, extract_labels_from_dataset
-
-# DataLoader creation
-from .loaders import create_data_loader, create_node_balanced_sampler
-
-# Dataset preparation
+from .loaders import (
+    create_data_loader,
+    create_node_downsample_sampler,
+    create_node_geomean_sampler,
+    create_node_hybrid_sampler,
+    create_node_upsample_sampler,
+)
 from .preprocessing import prepare_dataset
-
-# Transforms
 from .transforms import create_transforms
 
 __all__ = [
-    # Datasets
     "IterativeDataset",
     "GenericImageDataset",
     "extract_labels_from_dataset",
-    # Loaders
     "create_data_loader",
-    "create_node_balanced_sampler",
+    "create_node_upsample_sampler",
+    "create_node_downsample_sampler",
+    "create_node_hybrid_sampler",
+    "create_node_geomean_sampler",
     "prepare_dataset",
-    # Configs
     "DATASET_REGISTRY",
     "WATERBIRD_CONFIG",
     "CELEBA_CONFIG",
     "ISIC_CONFIG",
-    # Transforms
+    "UMNIST_CONFIG",
+    "CMNIST_CONFIG",
     "create_transforms",
 ]

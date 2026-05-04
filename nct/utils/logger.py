@@ -11,25 +11,17 @@ class NCTLogger:
     """Logger for NCT training with different verbosity levels and optional wandb logging."""
 
     def __init__(self, verbose: int, config):
-        """
-        Initialize logger.
-
-        Args:
-            verbose: 0=silent, 1=progress, 2=detailed
-            config: NCTConfig object (wandb settings extracted internally)
-        """
+        """Initialize logger. verbose: 0=silent, 1=progress, 2=detailed."""
         self.verbose = verbose
         self.config = config
         self.start_time = None
         self.iteration_start_time = None
 
-        # Extract wandb config internally
         self.wandb_logger = None
         self._wandb_enabled = config.wandb_enabled
         self._wandb_config = {}
 
         if self._wandb_enabled:
-            # Extract only wandb-specific settings
             self._wandb_config = {
                 "project": config.wandb_project,
                 "entity": config.wandb_entity,
@@ -41,7 +33,6 @@ class NCTLogger:
         """Print training start message and initialize wandb."""
         self.start_time = time.time()
 
-        # Initialize wandb logger if enabled
         if self._wandb_enabled:
             from .wandb_logger import WandbLogger
 
@@ -59,11 +50,10 @@ class NCTLogger:
                 f"Device: {config.get('device', 'auto')}"
             )
 
-            # Log architecture mode
             arch_mode = config.get("hierarchical_architecture", "none")
             if arch_mode == "correct_label_routing":
                 print("Architecture: Hierarchical (correct label routing)")
-            else:  # "none"
+            else:
                 print("Architecture: Simple (position-based split)")
 
             if self.wandb_logger and self.wandb_logger.enabled:
@@ -94,7 +84,6 @@ class NCTLogger:
                 f"\n--- Iteration {iteration}/{total_iterations}: Training with {num_nodes} nodes for {epochs} epochs ---\n"
             )
 
-            # Print hierarchical architecture info
             if self.config.hierarchical_architecture == "correct_label_routing":
                 if iteration > 1:
                     num_parent_layers = iteration - 1
@@ -112,7 +101,6 @@ class NCTLogger:
                 weights_array = self._to_numpy(class_weights)
                 print(f"  Class Weights: {np.round(weights_array, 2)}")
             elif self.config.use_class_weights:
-                # Class weights enabled but not applied - explain why
                 if iteration == 1 and self.config.skip_class_weights_iter1:
                     print(f"  Class Weights: Skipped for iteration 1 (skip_class_weights_iter1=True)")
 
@@ -142,6 +130,11 @@ class NCTLogger:
         worst_group_acc: float = 0.0,
         difficult_node_acc: float = 0.0,
         difficult_node_f1: float = 0.0,
+        iter2_level_wga: Optional[float] = None,
+        iter2_level_auroc: Optional[float] = None,
+        iter2_level_dna: Optional[float] = None,
+        iter2_level_dnf1: Optional[float] = None,
+        iteration_num: int = 1,
     ):
         """Print epoch update (only for verbose=2)."""
         if self.verbose >= 2:
@@ -150,17 +143,42 @@ class NCTLogger:
                 aux_info = (
                     f", Train Aux: {train_aux_loss:.4f}, Val Aux: {val_aux_loss:.4f}"
                 )
-            wga_info = ""
-            if worst_group_acc > 0:
-                wga_info = f", Val Pseudo-WGA: {worst_group_acc:.3f}"
-            dna_info = ""
-            if difficult_node_acc > 0:
-                dna_info = f", Val DNA: {difficult_node_acc:.3f}"
-            dnf1_info = ""
-            if difficult_node_f1 > 0:
-                dnf1_info = f", Val DNF1: {difficult_node_f1:.3f}"
+            # iter3+: suppress current-node metrics, show iter2-level instead
+            if iteration_num >= 3:
+                wga_info = ""
+                dna_info = ""
+                dnf1_info = ""
+                iter2_wga_info = ""
+                if iter2_level_wga is not None:
+                    iter2_wga_info = f", Val Iter2-Pseudo-WGA: {iter2_level_wga:.3f}"
+                iter2_dna_info = ""
+                if iter2_level_dna is not None:
+                    iter2_dna_info = f", Val Iter2-Pseudo-DNA: {iter2_level_dna:.3f}"
+                iter2_dnf1_info = ""
+                if iter2_level_dnf1 is not None:
+                    iter2_dnf1_info = f", Val Iter2-Pseudo-DNF1: {iter2_level_dnf1:.3f}"
+            else:
+                wga_info = ""
+                if worst_group_acc > 0:
+                    wga_info = f", Val Pseudo-WGA: {worst_group_acc:.3f}"
+                dna_info = ""
+                if difficult_node_acc > 0:
+                    dna_info = f", Val Pseudo-DNA: {difficult_node_acc:.3f}"
+                dnf1_info = ""
+                if difficult_node_f1 > 0:
+                    dnf1_info = f", Val Pseudo-DNF1: {difficult_node_f1:.3f}"
+                iter2_wga_info = ""
+                iter2_dna_info = ""
+                iter2_dnf1_info = ""
+            iter2_auroc_info = ""
+            if iteration_num >= 2 and iter2_level_auroc is not None:
+                import math as _math
+                if not _math.isnan(iter2_level_auroc):
+                    iter2_auroc_info = f", Val Iter2-AUROC: {iter2_level_auroc:.3f}"
             print(
-                f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}{aux_info}{wga_info}{dna_info}{dnf1_info}"
+                f"    Epoch {epoch}/{total_epochs}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}"
+                f"{aux_info}{wga_info}{iter2_wga_info}{iter2_dna_info}{iter2_dnf1_info}"
+                f"{iter2_auroc_info}{dna_info}{dnf1_info}"
             )
 
     def early_stop(self, phase_name: str, phase_num: int):
@@ -179,7 +197,7 @@ class NCTLogger:
             if completed_all:
                 print(" → completed all epochs")
             else:
-                print()  # New line after early stop or normal completion
+                print()
 
     def weight_transfer(self, hierarchical="none"):
         """Print weight transfer message."""
@@ -195,7 +213,6 @@ class NCTLogger:
             duration = time.time() - self.iteration_start_time
             if self.verbose == 1:
                 print(f"  ✓ Completed in {duration / 60:.1f} min\n")
-            # For verbose=2, just add extra spacing
             elif self.verbose >= 2:
                 print()
 
@@ -205,13 +222,7 @@ class NCTLogger:
         worst_group_acc: Optional[float] = None,
         finish_wandb: bool = True,
     ):
-        """Print training end message and optionally finish logging.
-
-        Args:
-            test_accuracy: Optional final test accuracy to display
-            worst_group_acc: Optional worst group accuracy to display
-            finish_wandb: Whether to finish WandB run now (False if attributions will be logged later)
-        """
+        """Print training end message and optionally finish wandb."""
         if self.verbose >= 1:
             if self.start_time:
                 total_duration = time.time() - self.start_time
@@ -223,18 +234,11 @@ class NCTLogger:
                     print(metrics_str)
                 print()
 
-        # Finish wandb run now if requested (or defer if attributions need to be logged)
         if finish_wandb:
             self.finish_wandb()
 
     def log(self, message: str, level: int = 1):
-        """
-        Generic log message.
-
-        Args:
-            message: Message to print
-            level: Minimum verbosity level to print (default 1)
-        """
+        """Print message if verbose >= level."""
         if self.verbose >= level:
             print(message)
 
@@ -269,6 +273,10 @@ class NCTLogger:
         val_aux_loss: float = 0.0,
         difficult_node_acc: float = 0.0,
         difficult_node_f1: float = 0.0,
+        iter2_level_wga: Optional[float] = None,
+        iter2_level_auroc: Optional[float] = None,
+        iter2_level_dna: Optional[float] = None,
+        iter2_level_dnf1: Optional[float] = None,
     ):
         """Log per-epoch metrics including auxiliary loss, DNA, and DNF1."""
         if self.wandb_logger:
@@ -289,6 +297,10 @@ class NCTLogger:
                 val_aux_loss,
                 difficult_node_acc,
                 difficult_node_f1,
+                iter2_level_wga,
+                iter2_level_auroc,
+                iter2_level_dna,
+                iter2_level_dnf1,
             )
 
     def log_iteration_summary(
@@ -300,6 +312,7 @@ class NCTLogger:
         training_time: float,
         num_epochs_trained: int = 0,
         early_stopped: bool = False,
+        consolidated_group_metrics: Optional[Dict[str, Any]] = None,
     ):
         """Log summary metrics after iteration completes."""
         if self.wandb_logger:
@@ -311,6 +324,7 @@ class NCTLogger:
                 training_time,
                 num_epochs_trained,
                 early_stopped,
+                consolidated_group_metrics,
             )
 
     def log_transition_statistics(
@@ -331,10 +345,8 @@ class NCTLogger:
 
     def log_weight_statistics(self, iteration: int, weight_stats: Dict[str, float]):
         """Log weight change statistics to wandb and print to console."""
-        # Print to console
         if self.verbose >= 1 and weight_stats:
             if self.verbose == 1:
-                # Compact format for verbose=1
                 parts = []
                 if "backbone_mean_abs_change" in weight_stats:
                     parts.append(
@@ -348,7 +360,6 @@ class NCTLogger:
                     print(f"  Weight drift: {', '.join(parts)}")
 
             elif self.verbose >= 2:
-                # Detailed format for verbose>=2
                 print("  Weight Changes:")
                 if "backbone_mean_abs_change" in weight_stats:
                     print(
@@ -361,7 +372,6 @@ class NCTLogger:
                         f"relative={weight_stats['heads_relative_change'] * 100:.2f}%"
                     )
 
-        # Log to wandb
         if self.wandb_logger:
             self.wandb_logger.log_weight_statistics(iteration, weight_stats)
 
@@ -370,23 +380,21 @@ class NCTLogger:
         test_metrics: Dict[str, Any],
         pseudo_metrics: Optional[Dict[str, Any]] = None,
         group_results: Optional[Dict[str, Any]] = None,
+        consolidated_group_results: Optional[Dict[str, Any]] = None,
+        class_names: Optional[tuple] = None,
     ):
-        """Print evaluation results to console based on verbosity level.
-
-        Order: Basic metrics → Worst-Group Accuracy → Group breakdown → Pseudo-label metrics
-        """
+        """Print evaluation results to console."""
         if self.verbose == 0:
             return
 
-        # 1. Print basic metrics
         self.log(f"Test Accuracy: {test_metrics['accuracy']:.2%}", level=1)
         if "auroc" in test_metrics and not math.isnan(test_metrics["auroc"]):
             self.log(f"Test AUROC: {test_metrics['auroc']:.4f}", level=1)
 
-        # 2. Print Worst-Group Accuracy (key metric for spurious correlation)
         if group_results is not None:
+            num_groups = len(group_results.get("group_metrics", {}))
             self.log(
-                f"Worst-Group Accuracy: {group_results['summary']['worst_group_accuracy']:.2%}",
+                f"Worst-Group Accuracy ({num_groups} groups): {group_results['summary']['worst_group_accuracy']:.2%}",
                 level=1,
             )
             if "worst_group_auroc" in group_results["summary"]:
@@ -395,7 +403,13 @@ class NCTLogger:
                     level=1,
                 )
 
-        # 3. Print additional basic metrics (less prominent)
+        if consolidated_group_results is not None:
+            num_consolidated = len(consolidated_group_results.get("per_class", {})) * 2
+            self.log(
+                f"Worst-Group Accuracy ({num_consolidated} consolidated): {consolidated_group_results['worst_group_accuracy']:.2%}",
+                level=1,
+            )
+
         self.log(f"Test Precision: {test_metrics['precision']:.4f}", level=2)
         self.log(f"Test Recall: {test_metrics['recall']:.4f}", level=2)
         self.log(f"Test F1 Score: {test_metrics['f1_score']:.4f}", level=2)
@@ -404,16 +418,53 @@ class NCTLogger:
         if "histopath_auroc" in test_metrics and not math.isnan(test_metrics["histopath_auroc"]):
             self.log(f"Histopath AUROC: {test_metrics['histopath_auroc']:.4f}", level=2)
 
-        # 4. Print group-specific performance breakdown
-        if group_results is not None:
-            self.log("\n--- Group-Specific Performance ---", level=1)
-            for group_name, metrics in group_results["group_metrics"].items():
-                acc_str = f"Acc: {metrics['accuracy']:.2%}"
-                if "auroc" in metrics and not math.isnan(metrics["auroc"]):
-                    acc_str += f", AUROC: {metrics['auroc']:.4f}"
-                self.log(f"  {group_name}: {acc_str}", level=1)
+        if consolidated_group_results is not None:
+            self.log("\n--- Consolidated Group Performance (Easy/Hard) ---", level=1)
+            per_class = consolidated_group_results.get("per_class", {})
+            for class_id in sorted(per_class.keys()):
+                metrics = per_class[class_id]
+                easy_acc = metrics["aligned_accuracy"]
+                hard_acc = metrics["conflicting_accuracy"]
+                easy_support = metrics["aligned_support"]
+                hard_support = metrics["conflicting_support"]
 
-        # 5. Print pseudo label metrics (routing quality - less important)
+                class_label = class_names[class_id] if class_names and class_id < len(class_names) else f"Class {class_id}"
+                easy_str = f"Easy: {easy_acc:.2%}" if not np.isnan(easy_acc) else "Easy: N/A"
+                hard_str = f"Hard: {hard_acc:.2%}" if not np.isnan(hard_acc) else "Hard: N/A"
+                self.log(f"  {class_label}:  {easy_str} (n={easy_support}),  {hard_str} (n={hard_support})", level=1)
+
+        if group_results is not None:
+            num_groups = len(group_results.get("group_metrics", {}))
+            self.log(f"\n--- Group-Specific Performance ({num_groups} groups) ---", level=2)
+
+            num_classes = self.config.num_classes
+            num_attrs_per_class = max(1, num_groups // num_classes)
+
+            # Sort by y_class (true class), then group_id (handles asymmetric splits)
+            sorted_metrics = sorted(
+                group_results["group_metrics"].items(),
+                key=lambda kv: (
+                    kv[1].get("y_class", kv[1].get("group_id", 0) // num_attrs_per_class),
+                    kv[1].get("group_id", 0),
+                ),
+            )
+
+            current_class_id = -1
+            for group_name, metrics in sorted_metrics:
+                group_id = metrics.get("group_id", 0)
+                class_id = metrics.get("y_class", group_id // num_attrs_per_class)
+
+                if class_id != current_class_id:
+                    current_class_id = class_id
+                    class_label = class_names[class_id] if class_names and class_id < len(class_names) else f"Class {class_id}"
+                    self.log(f"\n  {class_label}:", level=2)
+
+                support = metrics.get("support", "?")
+                acc_str = f"{metrics['accuracy']:.2%}  (n={support})"
+                if "auroc" in metrics and not math.isnan(metrics["auroc"]):
+                    acc_str += f",  AUROC: {metrics['auroc']:.4f}"
+                self.log(f"    {group_name}:  {acc_str}", level=2)
+
         if pseudo_metrics:
             self.log("\n--- Pseudo-Label Routing Metrics ---", level=2)
             self.log(
@@ -428,6 +479,22 @@ class NCTLogger:
                 f"Worst Pseudo Group Accuracy (Filled): {pseudo_metrics['worst_group_accuracy_filled']:.2%}",
                 level=2,
             )
+            if "iter2_level_worst_group_accuracy" in pseudo_metrics:
+                self.log(
+                    f"Iteration-2-Level Pseudo WGA (All): {pseudo_metrics['iter2_level_worst_group_accuracy']:.2%}",
+                    level=2,
+                )
+            if "iter2_level_worst_group_accuracy_filled" in pseudo_metrics:
+                self.log(
+                    f"Iteration-2-Level Pseudo WGA (Filled): {pseudo_metrics['iter2_level_worst_group_accuracy_filled']:.2%}",
+                    level=2,
+                )
+            if "iter2_level_worst_group_auroc" in pseudo_metrics:
+                auroc_val = pseudo_metrics["iter2_level_worst_group_auroc"]
+                self.log(
+                    f"Iteration-2-Level Pseudo AUROC (Worst Group): {auroc_val:.4f}",
+                    level=2,
+                )
             if "difficult_node_accuracy" in pseudo_metrics:
                 self.log(
                     f"Difficult Node Accuracy (DNA): {pseudo_metrics['difficult_node_accuracy']:.2%}",
@@ -438,12 +505,21 @@ class NCTLogger:
                     f"Difficult Node F1 (DNF1): {pseudo_metrics['difficult_node_f1']:.4f}",
                     level=2,
                 )
+            if "iter2_level_difficult_node_accuracy" in pseudo_metrics:
+                self.log(
+                    f"Iteration-2-Level DNA: {pseudo_metrics['iter2_level_difficult_node_accuracy']:.2%}",
+                    level=2,
+                )
+            if "iter2_level_difficult_node_f1" in pseudo_metrics:
+                self.log(
+                    f"Iteration-2-Level DNF1: {pseudo_metrics['iter2_level_difficult_node_f1']:.4f}",
+                    level=2,
+                )
             self.log(
                 f"Filled Classes: {pseudo_metrics['num_filled_classes']}/{pseudo_metrics['num_expected_classes']}",
                 level=2,
             )
 
-        # Print trailing newline (matches old behavior)
         self.log("", level=1)
 
     def log_transitions(
@@ -483,9 +559,119 @@ class NCTLogger:
             self.wandb_logger.log_transition_statistics(
                 prev_iteration, iteration, transitions
             )
-            self.wandb_logger.log_transition_statistics(
-                prev_iteration, iteration, transitions
+
+    def log_depth_decision(
+        self,
+        iteration: int,
+        value: Optional[float],
+        n_worst: Optional[int],
+        best_value: Optional[float],
+        best_iter: Optional[int],
+        epsilon: Optional[float],
+        decision: str,
+        metric: str = "wga",
+    ) -> None:
+        if self.verbose < 1:
+            return
+
+        key = f"pseudo_{metric}"
+        if decision == "bootstrap":
+            print(f"\n[DepthSel] iter {iteration}: bootstrap (not eligible for selection)")
+            return
+        if decision == "skip":
+            v = f"{value:.4f}" if value is not None else "n/a"
+            nw = n_worst if n_worst is not None else "n/a"
+            print(f"\n[DepthSel] iter {iteration}: {key}={v} n_worst={nw} (skipped — no valid node)")
+            return
+        if decision == "initial_best":
+            print(
+                f"\n[DepthSel] iter {iteration}: {key}={value:.4f} n_worst={n_worst} "
+                f"-> initial best"
             )
+            return
+
+        v = f"{value:.4f}" if value is not None else "n/a"
+        bv = f"{best_value:.4f}" if best_value is not None else "n/a"
+        eps = f"{epsilon:.4f}" if epsilon is not None else "n/a"
+        tag = {
+            "new_best": "-> NEW BEST",
+            "within_epsilon": f"-> within eps of best (iter {best_iter}, {key}={bv})",
+            "exceeded_epsilon": f"-> DROPPED beyond eps from best (iter {best_iter}, {key}={bv})",
+        }.get(decision, f"-> {decision}")
+        print(f"\n[DepthSel] iter {iteration}: {key}={v} n_worst={n_worst} eps={eps}  {tag}")
+
+    def log_depth_final_summary(
+        self,
+        enabled: bool,
+        selected_iter: Optional[int],
+        headline_iter: Optional[int],
+        stop_reason: str,
+        per_iter_stats: Dict[int, Dict[str, Any]],
+        last_trained_iter: int,
+        num_iterations: int,
+        early_stopped: bool,
+        metric: str = "wga",
+    ) -> None:
+        if self.verbose >= 1:
+            mode = "ENABLED" if enabled else "DISABLED"
+            key = f"pseudo_{metric}"
+            print(f"\n========== Depth Selection Summary ({mode}, metric={key}) ==========")
+
+            for it in sorted(per_iter_stats.keys()):
+                st = per_iter_stats[it]
+                value = st.get("value")
+                n_worst = st.get("n_worst")
+                decision = st.get("decision", "")
+                if value is None:
+                    row = f"  iter {it}: {key}=n/a        ({decision})"
+                else:
+                    row = f"  iter {it}: {key}={value:.4f}  n_worst={n_worst}  ({decision})"
+
+                markers = []
+                if enabled and it == selected_iter:
+                    markers.append("SELECTED")
+                if it == headline_iter:
+                    markers.append("HEADLINE")
+                if markers:
+                    row += "  <- " + " / ".join(markers)
+                print(row)
+
+            if not enabled and selected_iter is not None and selected_iter != headline_iter:
+                print(f"  [passive] selected_iter_if_enabled = {selected_iter}")
+
+            print(f"  stop reason:   {stop_reason}")
+            print(
+                f"  headline iter: {headline_iter} "
+                f"(last trained: {last_trained_iter}, max: {num_iterations})"
+            )
+            print("=" * 56)
+
+        if self.wandb_logger:
+            self.wandb_logger.log_depth_selection_summary(
+                enabled=enabled,
+                selected_iter=selected_iter,
+                headline_iter=headline_iter,
+                stop_reason=stop_reason,
+                per_iter_stats=per_iter_stats,
+                last_trained_iter=last_trained_iter,
+                num_iterations=num_iterations,
+                early_stopped=early_stopped,
+                metric=metric,
+            )
+
+    def log_wga_spearman(
+        self, spearman_r: float, n_epochs: int, variant: str = "full",
+        pseudo_metric: str = "WGA", true_metric: str = "WGA",
+    ):
+        """Log Spearman correlation of pseudo metric vs true metric."""
+        rhs = f"True {true_metric}" + ("" if variant == "full" else " (consolidated)")
+        if self.verbose >= 1:
+            print(
+                f"  Val Pseudo-{pseudo_metric} ↔ {rhs} Spearman r = {spearman_r:.4f} "
+                f"(over {n_epochs} epochs)"
+            )
+        if self.wandb_logger:
+            self.wandb_logger.log_wga_spearman(spearman_r, n_epochs, variant=variant)
 
     def finish_wandb(self):
         """Finish wandb run."""

@@ -19,47 +19,21 @@ def initialize_or_update_model(
     num_channels: int = 3,
     **model_kwargs
 ) -> HierarchicalClassifier:
-    """
-    Initialize a new hierarchical model or transfer weights from a previous one.
-    Args:
-        num_nodes: Number of nodes/heads for the new model
-        prev_model: Previous model to transfer weights from (optional)
-        backbone: Backbone architecture name
-        pretrained: Whether to use pretrained backbone weights
-        device: Device to place the model on
-        verbose: Verbosity level
-        iteration: Current iteration number (1-indexed)
-        hierarchical: Routing mode ('none' or 'correct_label_routing')
-        **model_kwargs: Additional arguments for HierarchicalClassifier
-    Returns:
-        HierarchicalClassifier: New model with optionally transferred weights
-    """
+    """Initialize a new hierarchical model or transfer weights from a previous one."""
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Determine if this mode uses tree structure
-    # Both correct_label_routing use tree structure
-    # Only "none" uses simple parallel heads
     use_tree_structure = (hierarchical != "none")
 
-    # Build parent layers for hierarchical modes (correct_label_routing)
     parent_layers = None
     if prev_model is not None and use_tree_structure and iteration > 1:
-        # Copy existing parent layers
         parent_layers = [layer for layer in prev_model.parent_layers]
 
-        # Convert old output heads to parent heads (keep all layers for auxiliary loss)
-        # Number of layers depends on head_type: mlp=4, linear=2
         new_parent_layer = nn.ModuleList()
         for old_head in prev_model.output_heads:
-            # Copy all layers from old head (works for both mlp and linear)
-            parent_head = nn.Sequential(
-                *[copy.deepcopy(old_head[i]) for i in range(len(old_head))]
-            )
-            new_parent_layer.append(parent_head)
+            new_parent_layer.append(copy.deepcopy(old_head))
         parent_layers.append(new_parent_layer)
 
-    # Create new model
     new_model = HierarchicalClassifier(
         num_heads=num_nodes,
         backbone=backbone,
@@ -72,7 +46,6 @@ def initialize_or_update_model(
     ).to(device)
 
     if prev_model is not None:
-        # Transfer the learned backbone weights
         try:
             new_model.base.load_state_dict(prev_model.base.state_dict())
             if verbose >= 2:
@@ -81,8 +54,6 @@ def initialize_or_update_model(
             if verbose >= 1:
                 print(f"Backbone transfer failed: {e}")
 
-        # Non-hierarchical mode (none): Transfer head weights to both children
-        # Hierarchical modes (correct_label_routing): Parent layers already transferred above
         if not use_tree_structure:
             for old_head_idx, old_head in enumerate(prev_model.output_heads):
                 easy_idx = old_head_idx * 2
@@ -102,14 +73,7 @@ def initialize_or_update_model(
 
 
 def count_parameters(model: nn.Module, only_trainable: bool = True) -> int:
-    """
-    Count the number of parameters in a model.
-    Args:
-        model: PyTorch model
-        only_trainable: If True, count only trainable parameters
-    Returns:
-        int: Number of parameters
-    """
+    """Count parameters in a model."""
     if only_trainable:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
     else:
@@ -117,12 +81,7 @@ def count_parameters(model: nn.Module, only_trainable: bool = True) -> int:
 
 
 def print_model_info(model: nn.Module, model_name: str = "Model") -> None:
-    """
-    Print information about a model.
-    Args:
-        model: PyTorch model
-        model_name: Name to display for the model
-    """
+    """Print information about a model."""
     total_params = count_parameters(model, only_trainable=False)
     trainable_params = count_parameters(model, only_trainable=True)
 

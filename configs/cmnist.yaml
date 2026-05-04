@@ -1,0 +1,59 @@
+# NCT configuration for CMNIST (5-class colored MNIST, LeNet-5 backbone)
+
+num_iterations: 3
+epochs_per_iteration: [50, 50, 50]
+batch_size: 128
+num_classes: 5
+seed: 42
+
+backbone: lenet5
+pretrained: false
+head_hidden_dim: 32
+head_dropout: 0.3
+head_type: mlp
+head_bn_affine: true
+iter1_head_type: linear
+split_node_head_type: true
+
+initial_base_lr: 5.0e-04
+initial_head_lr: 1.0e-04
+lr_decay_factor: 2.0
+
+optimizer:
+  type: adam
+  weight_decay: 5.0e-03
+
+scheduler:
+  type: plateau
+  patience: 5
+  factor: 0.5
+
+loss_type: ce
+use_class_weights: true
+skip_class_weights_iter1: true
+max_class_weight: 20.0
+regularization_type: l2
+aux_loss_weight: 0.3
+min_samples_per_node: 5
+
+phase1_epochs_ratio: [0, 0.3, 0.3]
+early_stopping: true
+model_selection_criterion: iter2_wga
+
+hierarchical_architecture: correct_label_routing
+routing_strategy: correctness
+sampling_strategy: geomean
+
+image_size: 32
+num_workers: 4
+pin_memory: true
+verbose: 2
+
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions
+log_attributions: true
+log_epoch_metrics: true
+
+wandb_enabled: false
+wandb_project: nct-cmnist
+wandb_tags: [cmnist, lenet]

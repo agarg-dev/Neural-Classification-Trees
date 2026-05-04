@@ -1,78 +1,62 @@
-# NCT Configuration for UMNIST Dataset
-#
-# Key differences from RGB datasets:
-# - Uses LeNet-5 backbone (no pretrained weights, grayscale input)
-# - Higher learning rates (no pretrained features to preserve)
-# - Lower weight decay (smaller model needs less regularization)
-# - Smaller head dimensions (LeNet outputs 84 features vs ResNet's 2048)
+# NCT configuration for UMNIST (Undersampled MNIST, LeNet-4 backbone)
 
-# Training parameters
 num_iterations: 3
-epochs_per_iteration: [1, 50, 50]
+epochs_per_iteration: [5, 50, 50]
 batch_size: 128
 seed: 42
 
-# Model architecture - LeNet-5 for MNIST-like datasets
-backbone: lenet5
+backbone: lenet4
 pretrained: false
 num_channels: 1
+head_hidden_dim: 64
+head_dropout: 0.2
 head_type: linear
-head_hidden_dim: 32
-head_dropout: 0.3
+split_node_head_type: true
 
-# Learning rates (higher since training from scratch)
-initial_base_lr: 0.001
-initial_head_lr: 0.005
-lr_decay_factor: 2.0
+initial_base_lr: 2.0e-03
+initial_head_lr: 1.0e-04
+lr_decay_factor: 1.0
 
-# Optimizer configuration
 optimizer:
-    type: adam
-    weight_decay: 5.0e-04
-    betas: [0.9, 0.999]
-    eps: 1.0e-08
+  type: adamw
+  weight_decay: 5.0e-03
 
-# Scheduler configuration
 scheduler:
-    type: plateau
-    patience: 5
-    factor: 0.5
+  type: plateau
+  patience: 5
+  factor: 0.5
 
-# Loss and regularization
 use_class_weights: true
+skip_class_weights_iter1: true
 max_class_weight: 20.0
 regularization_type: l2
 lambda_l1: 1.0e-05
-aux_loss_weight: 1
+aux_loss_weight: 0.5
+sampling_strategy: geomean
 
-# Training phases
-phase1_epochs_ratio: [1, 0.5, 0.5]
+phase1_epochs_ratio: [0, 0.5, 0.5]
 phase1_patience: 10
-phase2_patience: 10
+phase2_patience: 5
 early_stopping: true
-model_selection_criterion: auto
+model_selection_criterion: iter2_wga
+depth_selection_enabled: true
+depth_selection_confidence: 1.96
 
-# Routing strategy
 routing_strategy: correctness
 hierarchical_architecture: correct_label_routing
 
-# Data parameters
-image_size: 28
+image_size: 32
 num_workers: 4
 pin_memory: true
 
-# Logging
 log_attributions: true
 log_epoch_metrics: true
 verbose: 2
 
-# Wandb configuration
 wandb_enabled: false
-wandb_project: nct
-wandb_tags: [umnist, lenet5]
+wandb_project: nct-umnist
+wandb_tags: [umnist, lenet]
 
-# Checkpoint settings
 save_iteration_checkpoints: true
 checkpoint_dir: ./checkpoints
 attribution_dir: ./attributions
-

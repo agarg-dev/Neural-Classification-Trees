@@ -9,17 +9,7 @@ def collect_node_samples(
     num_per_node: int,
     seed: Optional[int] = None
 ) -> Dict[int, List[int]]:
-    """
-    Collect random sample indices for each predicted node.
-
-    Args:
-        predictions: Array of node predictions (shape: n_samples)
-        num_per_node: Number of samples to collect per node
-        seed: Random seed for reproducibility
-
-    Returns:
-        Dict mapping node_idx -> list of sample indices
-    """
+    """Collect random sample indices for each predicted node."""
     if seed is not None:
         np.random.seed(seed)
 
@@ -47,24 +37,11 @@ def collect_transition_samples(
     num_samples: int,
     seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Collect samples that transitioned between correct/incorrect predictions.
-
-    Args:
-        prev_correct: Boolean array of correctness at previous iteration
-        curr_correct: Boolean array of correctness at current iteration
-        num_samples: Number of samples to collect per transition type
-        seed: Random seed for reproducibility
-
-    Returns:
-        Tuple of (forgetting_indices, learning_indices)
-        - forgetting: Samples that went from correct to incorrect
-        - learning: Samples that went from incorrect to correct
-    """
+    """Return (forgetting_indices, learning_indices) sample sets between iterations."""
     if seed is not None:
         np.random.seed(seed)
 
-    # Forgetting: correct → incorrect
+    # Forgetting: correct -> incorrect
     forgetting_mask = prev_correct & ~curr_correct
     forgetting_indices = np.where(forgetting_mask)[0]
 
@@ -75,7 +52,7 @@ def collect_transition_samples(
             replace=False
         )
 
-    # Learning: incorrect → correct
+    # Learning: incorrect -> correct
     learning_mask = ~prev_correct & curr_correct
     learning_indices = np.where(learning_mask)[0]
 
@@ -95,18 +72,7 @@ def stratified_sample(
     num_samples: int,
     seed: Optional[int] = None
 ) -> np.ndarray:
-    """
-    Collect stratified sample across classes.
-
-    Args:
-        predictions: Array of predictions
-        labels: Array of true labels
-        num_samples: Total number of samples to collect
-        seed: Random seed
-
-    Returns:
-        Array of selected indices
-    """
+    """Collect stratified sample across classes."""
     if seed is not None:
         np.random.seed(seed)
 
