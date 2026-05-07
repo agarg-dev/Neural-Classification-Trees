@@ -1,42 +1,43 @@
 # NCT configuration for UMNIST (Undersampled MNIST, LeNet-4 backbone)
 
 num_iterations: 3
-epochs_per_iteration: [5, 50, 50]
-batch_size: 128
+epochs_per_iteration: [3, 50, 50]
+batch_size: 64
 seed: 42
 
 backbone: lenet4
 pretrained: false
 num_channels: 1
-head_hidden_dim: 64
-head_dropout: 0.2
+head_hidden_dim: 8
+head_dropout: 0
 head_type: linear
 split_node_head_type: true
 
-initial_base_lr: 2.0e-03
-initial_head_lr: 1.0e-04
-lr_decay_factor: 1.0
+initial_base_lr: 5.0e-03
+initial_head_lr: 5.0e-04
+lr_decay_factor: 1.5
 
 optimizer:
   type: adamw
-  weight_decay: 5.0e-03
+  weight_decay: 0.1
 
 scheduler:
   type: plateau
   patience: 5
-  factor: 0.5
+  factor: 0.1
+  eta_min: 1.0e-06
 
 use_class_weights: true
 skip_class_weights_iter1: true
 max_class_weight: 20.0
 regularization_type: l2
-lambda_l1: 1.0e-05
 aux_loss_weight: 0.5
+min_samples_per_node: 20
 sampling_strategy: geomean
 
 phase1_epochs_ratio: [0, 0.5, 0.5]
 phase1_patience: 10
-phase2_patience: 5
+phase2_patience: 15
 early_stopping: true
 model_selection_criterion: iter2_wga
 depth_selection_enabled: true

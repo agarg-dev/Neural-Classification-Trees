@@ -39,6 +39,8 @@ min_samples_per_node: 5
 phase1_epochs_ratio: [0, 0.3, 0.3]
 early_stopping: true
 model_selection_criterion: iter2_wga
+depth_selection_enabled: true
+depth_selection_confidence: 1.96
 
 hierarchical_architecture: correct_label_routing
 routing_strategy: correctness
