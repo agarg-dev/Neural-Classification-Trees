@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from matplotlib import cm
 from PIL import Image
 from torchvision import datasets
 from tqdm import tqdm
@@ -32,11 +33,16 @@ class CMNISTGenerator:
         random.seed(seed)
         np.random.seed(seed)
 
-        # 5 colors from the paper: {#ff0000, #85ff00, #00fff3, #6e00ff, #ff0018}
-        self.colors_hex = ["#ff0000", "#85ff00", "#00fff3", "#6e00ff", "#ff0018"]
+        # 5 colors sampled from the 'hsv' colormap at [0, 0.2, 0.4, 0.6, 0.8],
+        # matching CnC reference (datasets/colored_mnist.py:_init_colors).
+        cmap = cm.get_cmap("hsv")
+        cmap_vals = np.arange(0, 1, step=1 / 5)
         self.colors_rgb = [
-            tuple(int(h.lstrip("#")[i:i+2], 16) for i in (0, 2, 4))
-            for h in self.colors_hex
+            tuple(int(x) for x in (np.array(cmap(v)[:3]) * 255))
+            for v in cmap_vals
+        ]
+        self.colors_hex = [
+            "#" + "".join(f"{c:02x}" for c in rgb) for rgb in self.colors_rgb
         ]
 
     def download_mnist(self) -> tuple:
@@ -58,7 +64,7 @@ class CMNISTGenerator:
         self,
         train_data,
         test_data,
-        val_ratio: float = 0.2,
+        val_ratio: float = 0.1,
     ) -> dict:
         """Create train/val/test splits."""
         print("\nCreating data splits...")
@@ -98,17 +104,19 @@ class CMNISTGenerator:
             return random.choice(self.colors_rgb)
 
     def color_image(self, image: Image.Image, color: tuple) -> Image.Image:
-        """Color a grayscale image."""
+        """Color a grayscale image.
+
+        Matches CnC reference (datasets/colored_mnist.py:172-188): hard-threshold
+        digit pixels at >=120, replace them with the solid uint8 color, leave
+        sub-threshold (dark) pixels as grayscale replicated into RGB.
+        """
         img_arr = np.array(image)
-        img_arr_rgb = np.stack([img_arr]*3, axis=-1)
+        img_arr_rgb = np.stack([img_arr] * 3, axis=-1).astype(np.uint8)
 
-        # Create a color mask
-        color_mask = np.array(color).reshape(1, 1, 3)
+        pixels_r = np.where(np.logical_and(img_arr >= 120, img_arr <= 255))
+        img_arr_rgb[pixels_r[0], pixels_r[1], :] = np.array(color, dtype=np.uint8)
 
-        # Apply color. The digit part will be colored, background remains black.
-        colored_img_arr = (img_arr_rgb / 255.0 * color_mask).astype(np.uint8)
-
-        return Image.fromarray(colored_img_arr)
+        return Image.fromarray(img_arr_rgb)
 
     def generate_metadata_for_existing(self, dataset, indices, split_name) -> list:
         """Generate metadata records for already existing images (train/val)."""
@@ -118,12 +126,15 @@ class CMNISTGenerator:
         for idx in tqdm(indices, desc=f"  {split_name}", leave=False):
             img, digit = dataset[idx]
             y = digit // 2
+            color = self.get_color(y, split_name)
+            color_idx = self.colors_rgb.index(color)
             img_filename = f"{split_name}_{idx:06d}.png"
 
             records.append({
                 "img_filename": f"images/{img_filename}",
                 "y": y,
                 "digit": digit,
+                "color": color_idx,
                 "split": split_name,
             })
 
@@ -151,13 +162,10 @@ class CMNISTGenerator:
             # 5-class label: (0,1)->0, (2,3)->1, (4,5)->2, (6,7)->3, (8,9)->4
             y = digit // 2
 
-            # Get color based on correlation rule
             color = self.get_color(y, split_name)
-
-            # Color the image
+            color_idx = self.colors_rgb.index(color)
             colored_img = self.color_image(img, color)
 
-            # Save image
             img_filename = f"{split_name}_{idx:06d}.png"
             img_path = self.image_dir / img_filename
             colored_img.save(img_path)
@@ -166,6 +174,7 @@ class CMNISTGenerator:
                 "img_filename": f"images/{img_filename}",
                 "y": y,
                 "digit": digit,
+                "color": color_idx,
                 "split": split_name,
             })
 

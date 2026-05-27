@@ -87,11 +87,9 @@ class GenericImageDataset(Dataset):
         label = int(self.metadata.iloc[idx][self.label_col])
         mode = "L" if self.num_channels == 1 else "RGB"
 
-        # Load from RAM cache (PIL)
         if self._image_cache is not None and idx in self._image_cache:
             image = self._image_cache[idx]
         else:
-            # Load from disk (PIL)
             img_path = os.path.join(
                 self.root_dir, self.metadata.iloc[idx][self.img_filename_col]
             )

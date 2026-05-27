@@ -7,6 +7,7 @@ import argparse
 import math
 import os
 import sys
+import time
 from datetime import datetime
 
 # Add parent directory to path for nct package import
@@ -72,6 +73,52 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Number of transition samples for attributions.",
     )
+    parser.add_argument(
+        "--aux_loss_weight",
+        type=float,
+        default=None,
+        help="Override aux_loss_weight from YAML (for ablation studies).",
+    )
+    parser.add_argument(
+        "--split_node_head_type",
+        type=str,
+        default=None,
+        choices=["true", "false", "reversed"],
+        help="Override split_node_head_type from YAML (for ablation studies).",
+    )
+    parser.add_argument(
+        "--head_type",
+        type=str,
+        default=None,
+        choices=["linear", "mlp"],
+        help="Override head_type from YAML (for ablation studies).",
+    )
+    parser.add_argument(
+        "--phase1_uniform",
+        type=float,
+        default=None,
+        help="Override phase1_epochs_ratio with [value]*num_iterations (for ablation studies).",
+    )
+    parser.add_argument(
+        "--min_samples_per_node",
+        type=int,
+        default=None,
+        help="Override min_samples_per_node from YAML (for ablation studies).",
+    )
+    parser.add_argument(
+        "--sampling_strategy",
+        type=str,
+        default=None,
+        choices=["none", "upsample", "downsample", "geomean"],
+        help="Override sampling_strategy from YAML (for ablation studies).",
+    )
+    parser.add_argument(
+        "--use_class_weights",
+        type=str,
+        default=None,
+        choices=["true", "false"],
+        help="Override use_class_weights from YAML (for ablation studies).",
+    )
 
     return parser.parse_args()
 
@@ -83,12 +130,36 @@ def main():
     print("\n--- Loading Configuration from YAML ---")
     print(f"Preset: {args.preset}")
 
+    # Resolve string-typed CLI overrides into the types NCTConfig expects.
+    split_override = None
+    if args.split_node_head_type is not None:
+        split_override = {"true": True, "false": False, "reversed": "reversed"}[args.split_node_head_type]
+
+    # phase1_uniform: peek at num_iterations from the yaml to expand into a list.
+    phase1_override = None
+    if args.phase1_uniform is not None:
+        import yaml as _yaml
+        with open(args.preset, "r") as _f:
+            _n = int(_yaml.safe_load(_f).get("num_iterations", 3))
+        phase1_override = [args.phase1_uniform] * _n
+
+    use_cw_override = None
+    if args.use_class_weights is not None:
+        use_cw_override = args.use_class_weights == "true"
+
     # Load configuration from YAML with CLI overrides
     config = NCTConfig.from_yaml(
         args.preset,
         checkpoint_dir=args.checkpoint_dir,
         attribution_dir=args.attribution_dir,
         seed=args.seed,
+        aux_loss_weight=args.aux_loss_weight,
+        split_node_head_type=split_override,
+        head_type=args.head_type,
+        phase1_epochs_ratio=phase1_override,
+        min_samples_per_node=args.min_samples_per_node,
+        sampling_strategy=args.sampling_strategy,
+        use_class_weights=use_cw_override,
     )
 
     # Get job ID for wandb run name
@@ -133,19 +204,23 @@ def main():
 
     # Train the model - pass Dataset objects directly
     print("\n--- Starting NCT Training ---")
+    train_start = time.time()
     classifier.fit(
         X_train=data["train_dataset"],
         X_val=data["val_dataset"],
         X_test=data["test_dataset"],
         group_labels=data["group_test"],
+        val_group_labels=data.get("group_val"),
         dataset_name=dataset_config.name,
         class_names=dataset_config.class_names,
         group_names=dataset_config.group_names,
         test_subgroups=data.get("test_subgroups"),
     )
+    train_elapsed = time.time() - train_start
 
     # Evaluate on test set
     print("\n--- Final Evaluation ---")
+    inference_start = time.time()
     results = classifier.evaluate(
         X_test=data["test_dataset"],
         group_labels=data["group_test"],
@@ -154,6 +229,8 @@ def main():
         group_names=dataset_config.group_names,
         test_subgroups=data.get("test_subgroups"),
     )
+    inference_elapsed = time.time() - inference_start
+    n_test = len(data["test_dataset"])
 
     # Save final checkpoint with iteration results for future attribution generation
     final_checkpoint_path = os.path.join(config.checkpoint_dir, "final_model.pt")
@@ -164,7 +241,8 @@ def main():
     if args.generate_attributions:
         print("\n--- Generating Attribution Visualizations ---")
 
-        # Create unique run directory using job_id and timestamp
+        # Create unique run directory: {attribution_dir}/{job_id}_{timestamp}
+        # Note: config.attribution_dir already includes dataset and seed from fit()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         job_id = os.environ.get("SLURM_JOB_ID", "local")
         run_id = f"{job_id}_{timestamp}"
@@ -203,6 +281,10 @@ def main():
         print(
             f"  Worst Group Accuracy: {group_metrics['summary']['worst_group_accuracy']:.2%}"
         )
+
+    print(f"\n  Wall-Clock Time:")
+    print(f"    total_train_s: {train_elapsed:.1f}s ({train_elapsed/60:.1f}m)")
+    print(f"\n  Inference: {inference_elapsed:.2f}s ({n_test/max(inference_elapsed, 1e-6):.0f} samples/s)")
 
 
 if __name__ == "__main__":

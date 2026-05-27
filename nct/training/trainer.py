@@ -1,39 +1,34 @@
-"""
-Core Training Functionality for NCT.
-
-This module implements the NCTTrainer class which handles the two-phase
-training strategy (frozen backbone, then full fine-tuning) for hierarchical models.
-"""
+"""NCTTrainer: two-phase training (frozen backbone, then full fine-tuning) for hierarchical models."""
 
 import copy
+import math
 from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
+from sklearn.metrics import f1_score, roc_auc_score
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 
 from ..core.config import OptimizerConfig, SchedulerConfig
+from ..evaluation.metrics import compute_consolidated_group_metrics
 from ..utils.hierarchical import get_num_nodes
 from .loss import (
     compute_auxiliary_loss,
     compute_l1_penalty,
     compute_l1_penalty_heads,
-    weighted_bce_loss,
+    weighted_loss,
 )
 from .optimizer import create_optimizer, create_scheduler, create_two_stage_optimizer
 
 
 class NCTTrainer:
-    """
-    Trainer for hierarchical models with two-phase training strategy.
+    """Trainer for hierarchical models with two-phase training strategy.
 
     Phase 1: Train output heads with frozen base (backbone + parent layers).
     Phase 2: Fine-tune the entire model (base with base_lr, output heads with head_lr).
-
-    Supports early stopping, learning rate scheduling, and mixed precision training.
     """
 
     def __init__(
@@ -44,29 +39,21 @@ class NCTTrainer:
         logger,
         iteration_num: int = 1,
     ):
-        """
-        Initialize the trainer.
-        Args:
-            model: The hierarchical model to train (can be None initially)
-            device: Device for training
-            config: Training configuration
-            logger: NCTLogger instance for output
-            iteration_num: Current iteration number (for logging)
-        """
         self.model = model
         self.device = device
         self.config = config
         self.logger = logger
         self.iteration_num = iteration_num
 
-        # Use appropriate device for mixed precision training
         self.device_type = "cuda" if device.type == "cuda" else "cpu"
         self.scaler = GradScaler(self.device_type)
 
         # Early stopping tracking
         self.best_val_loss = float("inf")
-        self.best_worst_group_acc = 0.0  # Track best pseudo worst-group accuracy
-        self.best_difficult_node_acc = 0.0  # Track best difficult node accuracy (DNA)
+        self.best_worst_group_acc = 0.0
+        self.best_iter2_level_wga = 0.0
+        self.best_iter2_level_auroc = 0.0
+        self.best_difficult_node_acc = 0.0
         self.patience_counter = 0
         self.best_model_weights = None
         self.total_epochs_trained = 0
@@ -74,6 +61,12 @@ class NCTTrainer:
         # Auxiliary loss tracking
         self._last_train_aux_loss = 0.0
         self._last_val_aux_loss = 0.0
+
+        # (pseudo_wga, true_wga) pairs per epoch for Spearman correlation
+        self._wga_correlation_data: list = []
+        # Same, against bias-collapsed true WGA (CMNIST-style only)
+        self._wga_correlation_data_consolidated: list = []
+        self.val_group_labels = None  # set externally by NCTClassifier
 
     def train_iteration(
         self,
@@ -84,31 +77,18 @@ class NCTTrainer:
         head_lr: float,
         class_weights: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        """
-        Train the model for one iteration using two-phase approach.
-        Args:
-            train_loader: Training data loader.
-            val_loader: Validation data loader.
-            epochs: Number of epochs to train.
-            base_lr: Learning rate for backbone and parent layers.
-            head_lr: Learning rate for output heads.
-            class_weights: Class weights for loss computation.
-        Returns:
-            Dictionary containing training results:
-                - phase1_results: Results from phase 1 training.
-                - phase2_results: Results from phase 2 training.
-                - best_val_loss: Best validation loss achieved.
-                - total_epochs: Total number of epochs trained.
-                - early_stopped: Whether early stopping was triggered.
+        """Train one iteration via the two-phase approach.
+
+        Returns a dict with 'phase1_results', 'phase2_results', 'best_val_loss',
+        'total_epochs', 'early_stopped'.
         """
         val_class_weights = (
             torch.ones_like(class_weights) if class_weights is not None else None
         )
 
-        # Phase 1 training with its own early stopping
+        # Phase 1: frozen backbone, train heads only (early stopping is per-phase)
         self._reset_early_stopping()
 
-        # Get phase1 ratio for current iteration
         ratio = self.config["phase1_epochs_ratio"][self.iteration_num - 1]
         phase1_epochs = int(epochs * ratio)
         phase1_results = self._train_phase1(
@@ -120,8 +100,11 @@ class NCTTrainer:
             val_class_weights,
             total_epochs=epochs,
         )
+
         phase1_best_loss = self.best_val_loss
         phase1_best_wga = self.best_worst_group_acc
+        phase1_best_iter2_wga = self.best_iter2_level_wga
+        phase1_best_iter2_auroc = self.best_iter2_level_auroc
         phase1_best_dna = self.best_difficult_node_acc
         phase1_best_weights = copy.deepcopy(self.best_model_weights)
 
@@ -144,6 +127,8 @@ class NCTTrainer:
         )
         phase2_best_loss = self.best_val_loss
         phase2_best_wga = self.best_worst_group_acc
+        phase2_best_iter2_wga = self.best_iter2_level_wga
+        phase2_best_iter2_auroc = self.best_iter2_level_auroc
         phase2_best_dna = self.best_difficult_node_acc
         phase2_best_weights = copy.deepcopy(self.best_model_weights)
 
@@ -152,11 +137,33 @@ class NCTTrainer:
         use_wga_for_selection = (criterion == "wga") or (
             criterion == "auto" and self.iteration_num > 1
         )
+        use_iter2_wga_for_selection = (criterion == "iter2_wga") and (
+            self.iteration_num > 1
+        )
+        use_iter2_auroc_for_selection = (criterion == "iter2_auroc") and (
+            self.iteration_num > 1
+        )
         use_dna_for_selection = (criterion == "dna") and (self.iteration_num > 1)
 
         if use_dna_for_selection:
             # Higher is better for difficult node accuracy
             if phase1_best_dna > phase2_best_dna:
+                self.model.load_state_dict(phase1_best_weights)
+                self.best_model_weights = phase1_best_weights
+            else:
+                self.model.load_state_dict(phase2_best_weights)
+                self.best_model_weights = phase2_best_weights
+        elif use_iter2_auroc_for_selection:
+            # Higher is better for iter2-level AUROC
+            if phase1_best_iter2_auroc > phase2_best_iter2_auroc:
+                self.model.load_state_dict(phase1_best_weights)
+                self.best_model_weights = phase1_best_weights
+            else:
+                self.model.load_state_dict(phase2_best_weights)
+                self.best_model_weights = phase2_best_weights
+        elif use_iter2_wga_for_selection:
+            # Higher is better for iter2-level worst-group accuracy
+            if phase1_best_iter2_wga > phase2_best_iter2_wga:
                 self.model.load_state_dict(phase1_best_weights)
                 self.best_model_weights = phase1_best_weights
             else:
@@ -189,10 +196,13 @@ class NCTTrainer:
         }
 
     def _reset_early_stopping(self):
-        """Reset early stopping tracking for new phase."""
+        """Reset early-stopping trackers for a new phase."""
         self.best_val_loss = float("inf")
-        self.best_worst_group_acc = -1.0  # Initialize to -1 so first epoch always saves
-        self.best_difficult_node_acc = -1.0  # Initialize to -1 so first epoch always saves
+        # Initialise to -1 so the first epoch always wins and saves weights.
+        self.best_worst_group_acc = -1.0
+        self.best_iter2_level_wga = -1.0
+        self.best_iter2_level_auroc = -1.0
+        self.best_difficult_node_acc = -1.0
         self.patience_counter = 0
         self.best_model_weights = copy.deepcopy(self.model.state_dict())
 
@@ -206,19 +216,7 @@ class NCTTrainer:
         val_class_weights: Optional[torch.Tensor],
         total_epochs: int = None,
     ) -> Dict[str, Any]:
-        """
-        Execute phase 1 training with frozen base (backbone + parent layers).
-        Args:
-            train_loader: Training data loader.
-            val_loader: Validation data loader.
-            epochs: Number of epochs for this phase.
-            head_lr: Learning rate for output heads.
-            class_weights: Training class weights.
-            val_class_weights: Validation class weights.
-            total_epochs: Total epochs across both phases (for logging).
-        Returns:
-            Dictionary with phase 1 training results.
-        """
+        """Phase 1: train output heads only (backbone + parent layers frozen)."""
         if epochs <= 0:
             return {"epochs": 0, "train_losses": [], "val_losses": []}
 
@@ -226,16 +224,14 @@ class NCTTrainer:
             "Phase 1: Training output heads (backbone + parent layers frozen)", 1, epochs
         )
 
-        # Freeze backbone
         for param in self.model.base.parameters():
             param.requires_grad = False
 
-        # Freeze parent layers (hierarchical mode only)
+        # Parent layers exist only in hierarchical mode (empty ModuleList otherwise).
         for parent_layer in self.model.parent_layers:
             for param in parent_layer.parameters():
                 param.requires_grad = False
 
-        # Get head parameters (output_heads only, base and parent_layers are frozen)
         model_params = self.model.get_trainable_parameters()
 
         optimizer_config = OptimizerConfig(**self.config.get("optimizer"))
@@ -280,31 +276,15 @@ class NCTTrainer:
         total_epochs: int = None,
         epoch_offset: int = 0,
     ) -> Dict[str, Any]:
-        """
-        Execute phase 2 training with full model fine-tuning.
-        Args:
-            train_loader: Training data loader.
-            val_loader: Validation data loader.
-            epochs: Number of epochs for this phase.
-            base_lr: Learning rate for backbone and parent layers.
-            head_lr: Learning rate for output heads.
-            class_weights: Training class weights.
-            val_class_weights: Validation class weights.
-            total_epochs: Total epochs across both phases (for logging).
-            epoch_offset: Epoch offset for logging (phase 1 epochs).
-        Returns:
-            Dictionary with phase 2 training results.
-        """
+        """Phase 2: full-model fine-tuning with separate base/head learning rates."""
         if epochs <= 0:
             return {"epochs": 0, "train_losses": [], "val_losses": []}
 
         self.logger.phase_start("Phase 2: Fine-tuning the full model", 2, epochs)
 
-        # Unfreeze backbone
         for param in self.model.base.parameters():
             param.requires_grad = True
 
-        # Unfreeze parent layers (hierarchical mode only)
         for parent_layer in self.model.parent_layers:
             for param in parent_layer.parameters():
                 param.requires_grad = True
@@ -355,23 +335,7 @@ class NCTTrainer:
         epoch_offset: int = 0,
         patience: int = 10,
     ) -> Dict[str, Any]:
-        """
-        Execute training for a specified number of epochs.
-        Args:
-            train_loader: Training data loader.
-            val_loader: Validation data loader.
-            epochs: Number of epochs to train.
-            optimizer: Optimizer instance.
-            scheduler: Learning rate scheduler.
-            class_weights: Training class weights.
-            val_class_weights: Validation class weights.
-            phase_name: Name of current phase (for logging).
-            total_epochs: Total epochs across both phases.
-            epoch_offset: Epoch offset for logging.
-            patience: Early stopping patience for this phase.
-        Returns:
-            Dictionary with training results.
-        """
+        """Train `epochs` epochs with the given optimizer/scheduler, with early stopping."""
         train_losses = []
         val_losses = []
 
@@ -381,7 +345,6 @@ class NCTTrainer:
         phase_num = 1 if "Phase 1" in phase_name else 2
         log_metrics = self.config["log_epoch_metrics"]
 
-        # Log early stopping criterion for this iteration
         criterion = self.config.get("model_selection_criterion", "auto")
         if criterion == "val_loss":
             self.logger.log("    Early stopping criterion: val_loss", level=2)
@@ -389,6 +352,28 @@ class NCTTrainer:
             self.logger.log(
                 "    Early stopping criterion: pseudo WGA (filled groups)", level=2
             )
+        elif criterion == "iter2_wga":
+            if self.iteration_num == 1:
+                self.logger.log(
+                    "    Early stopping criterion: val_loss (iter2_wga: iteration 1)",
+                    level=2,
+                )
+            else:
+                self.logger.log(
+                    "    Early stopping criterion: iteration-2-level pseudo WGA (filled groups)",
+                    level=2,
+                )
+        elif criterion == "iter2_auroc":
+            if self.iteration_num == 1:
+                self.logger.log(
+                    "    Early stopping criterion: val_loss (iter2_auroc: iteration 1)",
+                    level=2,
+                )
+            else:
+                self.logger.log(
+                    "    Early stopping criterion: iteration-2-level pseudo AUROC",
+                    level=2,
+                )
         elif criterion == "dna":
             if self.iteration_num == 1:
                 self.logger.log(
@@ -445,6 +430,26 @@ class NCTTrainer:
                     worst_group_acc=val_result.get("worst_group_accuracy", 0.0),
                     difficult_node_acc=val_result.get("difficult_node_accuracy", 0.0),
                     difficult_node_f1=val_result.get("difficult_node_f1", 0.0),
+                    iter2_level_wga=(
+                        val_result.get("iter2_level_worst_group_accuracy_filled")
+                        if self.iteration_num >= 3
+                        else None
+                    ),
+                    iter2_level_auroc=(
+                        val_result.get("iter2_level_worst_group_auroc")
+                        if self.iteration_num >= 2
+                        else None
+                    ),
+                    iter2_level_dna=(
+                        val_result.get("iter2_level_difficult_node_accuracy")
+                        if self.iteration_num >= 3
+                        else None
+                    ),
+                    iter2_level_dnf1=(
+                        val_result.get("iter2_level_difficult_node_f1")
+                        if self.iteration_num >= 3
+                        else None
+                    ),
                 )
 
             if scheduler is not None:
@@ -458,18 +463,29 @@ class NCTTrainer:
             # Early stopping criterion selection:
             # - "val_loss": Always use validation loss
             # - "wga": Always use pseudo worst-group accuracy (filled groups only)
+            # - "iter2_wga": val_loss for iteration 1, iter2-level pseudo WGA for iteration 2+
+            # - "iter2_auroc": val_loss for iteration 1, iter2-level pseudo AUROC for iteration 2+
             # - "dna": val_loss for iteration 1, difficult node accuracy for iteration 2+
             # - "auto": val_loss for iteration 1, wga for iteration 2+
             criterion = self.config.get("model_selection_criterion", "auto")
 
             use_wga = False
+            use_iter2_wga = False
+            use_iter2_auroc = False
             use_dna = False
 
             if criterion == "val_loss":
-                use_wga = False
-                use_dna = False
+                pass
             elif criterion == "wga":
                 use_wga = "worst_group_accuracy_filled" in val_result
+            elif criterion == "iter2_wga":
+                use_iter2_wga = (
+                    self.iteration_num > 1
+                ) and "iter2_level_worst_group_accuracy_filled" in val_result
+            elif criterion == "iter2_auroc":
+                use_iter2_auroc = (
+                    self.iteration_num > 1
+                ) and "iter2_level_worst_group_auroc" in val_result
             elif criterion == "dna":
                 # DNA uses val_loss for iteration 1, DNA for iteration 2+
                 use_dna = (
@@ -480,28 +496,47 @@ class NCTTrainer:
                     self.iteration_num > 1
                 ) and "worst_group_accuracy_filled" in val_result
 
+            # For non-loss criteria: higher metric is better; also stash val_loss for logging.
             if use_dna:
-                # Higher is better for difficult node accuracy
                 dna = val_result["difficult_node_accuracy"]
                 if dna > self.best_difficult_node_acc:
                     self.best_difficult_node_acc = dna
-                    self.best_val_loss = val_loss  # Also update for logging
+                    self.best_val_loss = val_loss
+                    self.patience_counter = 0
+                    self.best_model_weights = copy.deepcopy(self.model.state_dict())
+                else:
+                    self.patience_counter += 1
+            elif use_iter2_auroc:
+                iter2_auroc = val_result["iter2_level_worst_group_auroc"]
+                if math.isnan(iter2_auroc):
+                    iter2_auroc = 0.0
+                if iter2_auroc > self.best_iter2_level_auroc:
+                    self.best_iter2_level_auroc = iter2_auroc
+                    self.best_val_loss = val_loss
+                    self.patience_counter = 0
+                    self.best_model_weights = copy.deepcopy(self.model.state_dict())
+                else:
+                    self.patience_counter += 1
+            elif use_iter2_wga:
+                iter2_wga = val_result["iter2_level_worst_group_accuracy_filled"]
+                if iter2_wga > self.best_iter2_level_wga:
+                    self.best_iter2_level_wga = iter2_wga
+                    self.best_val_loss = val_loss
                     self.patience_counter = 0
                     self.best_model_weights = copy.deepcopy(self.model.state_dict())
                 else:
                     self.patience_counter += 1
             elif use_wga:
-                # Higher is better for worst-group accuracy (use filled groups only)
                 worst_group_acc = val_result["worst_group_accuracy_filled"]
                 if worst_group_acc > self.best_worst_group_acc:
                     self.best_worst_group_acc = worst_group_acc
-                    self.best_val_loss = val_loss  # Also update for logging
+                    self.best_val_loss = val_loss
                     self.patience_counter = 0
                     self.best_model_weights = copy.deepcopy(self.model.state_dict())
                 else:
                     self.patience_counter += 1
             else:
-                # Use validation loss
+                # val_loss: lower is better
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     self.patience_counter = 0
@@ -520,7 +555,57 @@ class NCTTrainer:
                 worst_group_acc=val_result.get("worst_group_accuracy", 0.0),
                 difficult_node_acc=val_result.get("difficult_node_accuracy", 0.0),
                 difficult_node_f1=val_result.get("difficult_node_f1", 0.0),
+                iter2_level_wga=(
+                    val_result.get("iter2_level_worst_group_accuracy_filled")
+                    if self.iteration_num >= 3
+                    else None
+                ),
+                iter2_level_auroc=(
+                    val_result.get("iter2_level_worst_group_auroc")
+                    if self.iteration_num >= 2
+                    else None
+                ),
+                iter2_level_dna=(
+                    val_result.get("iter2_level_difficult_node_accuracy")
+                    if self.iteration_num >= 3
+                    else None
+                ),
+                iter2_level_dnf1=(
+                    val_result.get("iter2_level_difficult_node_f1")
+                    if self.iteration_num >= 3
+                    else None
+                ),
+                iteration_num=self.iteration_num,
             )
+
+            # Skip iter 1: pseudo-WGA is class-imbalance, not the Easy/Difficult proxy
+            if "val_true_wga" in val_result and self.iteration_num >= 2:
+                criterion = self.config.get("model_selection_criterion", "auto")
+                use_auroc = (criterion == "iter2_auroc")
+                if use_auroc:
+                    pseudo_corr = val_result.get("iter2_level_worst_group_auroc")
+                    if pseudo_corr is not None and math.isnan(pseudo_corr):
+                        pseudo_corr = None
+                    true_corr = val_result.get("val_true_auroc")
+                    true_corr_consolidated = None
+                elif self.iteration_num >= 3 and "iter2_level_worst_group_accuracy" in val_result:
+                    pseudo_corr = val_result["iter2_level_worst_group_accuracy"]
+                    true_corr = val_result["val_true_wga"]
+                    true_corr_consolidated = val_result.get("val_true_wga_consolidated")
+                elif "worst_group_accuracy" in val_result:
+                    pseudo_corr = val_result["worst_group_accuracy"]
+                    true_corr = val_result["val_true_wga"]
+                    true_corr_consolidated = val_result.get("val_true_wga_consolidated")
+                else:
+                    pseudo_corr = None
+                    true_corr = None
+                    true_corr_consolidated = None
+                if pseudo_corr is not None and true_corr is not None:
+                    self._wga_correlation_data.append((pseudo_corr, true_corr))
+                    if true_corr_consolidated is not None:
+                        self._wga_correlation_data_consolidated.append(
+                            (pseudo_corr, true_corr_consolidated)
+                        )
 
             if self.config["early_stopping"] and self.patience_counter >= patience:
                 self.logger.early_stop(phase_name, phase_num)
@@ -544,21 +629,13 @@ class NCTTrainer:
         optimizer: torch.optim.Optimizer,
         class_weights: Optional[torch.Tensor],
     ) -> float:
-        """
-        Execute a single training epoch.
-        Args:
-            loader: Training data loader.
-            optimizer: Optimizer instance.
-            class_weights: Class weights for loss computation.
-        Returns:
-            Average training loss for the epoch.
-        """
+        """Run one training epoch; returns mean loss."""
         self.model.train()
         total_loss = 0.0
         total_aux_loss = 0.0
         num_batches = 0
 
-        # Check if auxiliary loss should be computed
+        # Auxiliary loss is only meaningful in tree mode and after the first iteration.
         aux_weight = self.config.get("aux_loss_weight", 0.0)
         use_aux_loss = (
             aux_weight > 0
@@ -572,16 +649,14 @@ class NCTTrainer:
             optimizer.zero_grad()
 
             with autocast(self.device_type):
-                # Get outputs and optionally auxiliary outputs
                 if use_aux_loss:
                     outputs, aux_outputs = self.model(images, return_aux_outputs=True)
                 else:
                     outputs = self.model(images)
 
-                # Main loss
-                loss = weighted_bce_loss(outputs, labels, class_weights)
+                num_base_classes = self.config.get("num_classes", 2)
+                loss = weighted_loss(outputs, labels, class_weights, num_base_classes)
 
-                # Auxiliary loss
                 if use_aux_loss:
                     aux_loss = compute_auxiliary_loss(
                         aux_outputs,
@@ -589,18 +664,17 @@ class NCTTrainer:
                         self.iteration_num,
                         class_weights,
                         max_weight=self.config.get("max_class_weight"),
-                        num_classes=self.config.get("num_classes", 2),
+                        num_classes=num_base_classes,
                     )
-                    weighted_aux = aux_weight * aux_loss
-                    loss = loss + weighted_aux
+                    loss = loss + aux_weight * aux_loss
                     total_aux_loss += aux_loss.item()
 
-                # Add L1 regularization if configured
+                # L1 penalty applies for both pure-L1 and elastic-net regularisation.
                 if self.config["regularization_type"] in ["l1", "elastic_net"]:
                     lambda_l1 = self.config["lambda_l1"]
                     if lambda_l1 > 0:
                         loss += lambda_l1 * compute_l1_penalty_heads(self.model)
-                        # loss += lambda_l1 * compute_l1_penalty(self.model)
+
 
             self.scaler.scale(loss).backward()
             self.scaler.step(optimizer)
@@ -609,7 +683,6 @@ class NCTTrainer:
             total_loss += loss.item()
             num_batches += 1
 
-        # Store auxiliary loss for logging
         self._last_train_aux_loss = (
             total_aux_loss / num_batches if use_aux_loss and num_batches > 0 else 0.0
         )
@@ -622,23 +695,20 @@ class NCTTrainer:
         class_weights: Optional[torch.Tensor],
         compute_metrics: bool = False,
     ) -> Dict[str, float]:
-        """
-        Execute a single validation epoch.
-        Args:
-            loader: Validation data loader.
-            class_weights: Class weights for loss computation.
-            compute_metrics: Whether to compute accuracy/F1 (slower)
-        Returns:
-            Dictionary with loss, pseudo worst-group accuracy, and optionally other metrics.
-        """
+        """Run one validation epoch; returns a dict of loss + pseudo-group metrics."""
         self.model.eval()
         total_loss = 0.0
         total_aux_loss = 0.0
         num_batches = 0
         all_preds = []
         all_labels = []
+        all_probs = []  # only populated when compute_pseudo_auroc is True
 
-        # Check if auxiliary loss should be computed
+        compute_pseudo_auroc = (
+            self.config.get("model_selection_criterion", "auto") == "iter2_auroc"
+        )
+
+        # Aux loss only applies in tree mode after the first iteration.
         aux_weight = self.config.get("aux_loss_weight", 0.0)
         use_aux_loss = (
             aux_weight > 0
@@ -651,7 +721,6 @@ class NCTTrainer:
                 images, labels = images.to(self.device), labels.to(self.device)
 
                 with autocast(self.device_type):
-                    # Get outputs and optionally auxiliary outputs
                     if use_aux_loss:
                         outputs, aux_outputs = self.model(
                             images, return_aux_outputs=True
@@ -659,10 +728,10 @@ class NCTTrainer:
                     else:
                         outputs = self.model(images)
 
-                    # Main loss
-                    loss = weighted_bce_loss(outputs, labels, class_weights)
+                    num_base_classes = self.config.get("num_classes", 2)
+                    loss = weighted_loss(outputs, labels, class_weights, num_base_classes)
 
-                    # Auxiliary loss (computed separately, not added to loss for validation)
+                    # Aux loss is tracked separately on val so it doesn't perturb the loss metric.
                     if use_aux_loss:
                         aux_loss = compute_auxiliary_loss(
                             aux_outputs,
@@ -670,19 +739,20 @@ class NCTTrainer:
                             self.iteration_num,
                             class_weights,
                             max_weight=self.config.get("max_class_weight"),
-                            num_classes=self.config.get("num_classes", 2),
+                            num_classes=num_base_classes,
                         )
                         total_aux_loss += aux_loss.item()
 
                 total_loss += loss.item()
                 num_batches += 1
 
-                # Always collect predictions and labels for pseudo worst-group accuracy
+                # Always collect predictions for pseudo worst-group accuracy.
                 preds = torch.argmax(outputs, dim=1)
                 all_preds.append(preds.cpu())
                 all_labels.append(labels.cpu())
+                if compute_pseudo_auroc:
+                    all_probs.append(torch.softmax(outputs, dim=1).cpu())
 
-        # Store auxiliary loss for logging
         self._last_val_aux_loss = (
             total_aux_loss / num_batches if use_aux_loss and num_batches > 0 else 0.0
         )
@@ -690,16 +760,14 @@ class NCTTrainer:
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         result = {"loss": avg_loss}
 
-        # Compute pseudo worst-group accuracy (per hierarchical node)
+        # Pseudo worst-group accuracy: each hierarchical node is treated as a pseudo group.
         if len(all_preds) > 0:
             all_preds = torch.cat(all_preds)
             all_labels = torch.cat(all_labels)
 
-            # Number of pseudo-groups = number of hierarchical nodes at this iteration
             num_classes = self.config.get('num_classes', 2)
             num_groups = get_num_nodes(self.iteration_num, num_classes)
 
-            # Compute per-group accuracy and sizes
             group_accuracies = []
             node_sizes = {}
             per_node_accuracy = {}
@@ -732,21 +800,120 @@ class NCTTrainer:
                 result["node_sizes"] = node_sizes
                 result["per_node_accuracy"] = per_node_accuracy
 
+            # Iteration-2-level collapsed pseudo WGA (e.g., 8->4, 16->4 for binary).
+            base_num_classes = self.config.get("num_classes", 2)
+            iter2_expected_groups = int(base_num_classes) * 2
+            if (
+                num_groups >= iter2_expected_groups
+                and num_groups % iter2_expected_groups == 0
+            ):
+                all_labels_np = all_labels.numpy()
+                all_preds_np = all_preds.numpy()
+                collapse_factor = num_groups // iter2_expected_groups
+                collapsed_labels = all_labels_np // collapse_factor
+                collapsed_preds = all_preds_np // collapse_factor
+
+                iter2_group_accuracies = []
+                iter2_group_accuracies_filled = []
+                iter2_node_sizes = {}
+                iter2_per_node_accuracy = {}
+                min_required = max(1, self.config.get("min_samples_per_node", 0))
+
+                for group_id in range(iter2_expected_groups):
+                    group_mask = collapsed_labels == group_id
+                    group_count = int(group_mask.sum())
+                    iter2_node_sizes[group_id] = group_count
+
+                    if group_count > 0:
+                        group_correct = (collapsed_preds[group_mask] == collapsed_labels[group_mask]).sum()
+                        group_acc = float(group_correct / group_count)
+                        iter2_group_accuracies.append(group_acc)
+                        iter2_per_node_accuracy[group_id] = group_acc
+                        if group_count >= min_required:
+                            iter2_group_accuracies_filled.append(group_acc)
+                    else:
+                        iter2_group_accuracies.append(0.0)
+                        iter2_per_node_accuracy[group_id] = 0.0
+
+                result["iter2_level_worst_group_accuracy"] = min(iter2_group_accuracies)
+                result["iter2_level_worst_group_accuracy_filled"] = (
+                    min(iter2_group_accuracies_filled)
+                    if len(iter2_group_accuracies_filled) > 0
+                    else 0.0
+                )
+                result["iter2_level_num_groups_present"] = len(
+                    [x for x in iter2_node_sizes.values() if x > 0]
+                )
+                result["iter2_level_num_groups_expected"] = iter2_expected_groups
+                result["iter2_level_node_sizes"] = iter2_node_sizes
+                result["iter2_level_per_node_accuracy"] = iter2_per_node_accuracy
+
+                # Iter-2-level DNA/DNF1
+                iter2_difficult_mask = (collapsed_labels % 2 == 1)
+                if iter2_difficult_mask.sum() > 0:
+                    iter2_diff_correct = (
+                        collapsed_preds[iter2_difficult_mask]
+                        == collapsed_labels[iter2_difficult_mask]
+                    ).sum()
+                    iter2_dna = float(iter2_diff_correct / iter2_difficult_mask.sum())
+                    iter2_diff_labels = np.unique(collapsed_labels[iter2_difficult_mask])
+                    iter2_dnf1 = float(f1_score(
+                        collapsed_labels[iter2_difficult_mask],
+                        collapsed_preds[iter2_difficult_mask],
+                        labels=iter2_diff_labels,
+                        average="macro",
+                        zero_division=1.0,
+                    ))
+                else:
+                    iter2_dna = 1.0
+                    iter2_dnf1 = 1.0
+                result["iter2_level_difficult_node_accuracy"] = iter2_dna
+                result["iter2_level_difficult_node_f1"] = iter2_dnf1
+
+                # Iter-2-level pseudo AUROC (one-vs-rest per collapsed group).
+                if compute_pseudo_auroc and len(all_probs) > 0:
+                    all_probs_np = torch.cat(all_probs).numpy()
+                    collapsed_probs = np.zeros(
+                        (len(collapsed_labels), iter2_expected_groups), dtype=np.float64
+                    )
+                    for j in range(iter2_expected_groups):
+                        s = j * collapse_factor
+                        e = (j + 1) * collapse_factor
+                        collapsed_probs[:, j] = all_probs_np[:, s:e].sum(axis=1)
+
+                    iter2_auroc_scores = []
+                    for j in range(iter2_expected_groups):
+                        binary_labels = (collapsed_labels == j).astype(int)
+                        if 0 < binary_labels.sum() < len(binary_labels):
+                            try:
+                                iter2_auroc_scores.append(
+                                    roc_auc_score(binary_labels, collapsed_probs[:, j])
+                                )
+                            except ValueError:
+                                pass
+                    result["iter2_level_worst_group_auroc"] = (
+                        float(min(iter2_auroc_scores))
+                        if iter2_auroc_scores
+                        else float("nan")
+                    )
+            else:
+                all_labels_np = all_labels.numpy()
+                all_preds_np = all_preds.numpy()
+
             # Compute difficult node accuracy (DNA) and F1
             # Difficult nodes have odd indices (1, 3, 5, 7, ...)
-            all_labels_np = all_labels.numpy()
-            all_preds_np = all_preds.numpy()
             difficult_mask = (all_labels_np % 2 == 1)
 
             if difficult_mask.sum() > 0:
                 difficult_correct = (all_preds_np[difficult_mask] == all_labels_np[difficult_mask]).sum()
                 difficult_total = difficult_mask.sum()
                 dna = float(difficult_correct / difficult_total)
-                # Compute F1 on difficult nodes
-                from sklearn.metrics import f1_score as sklearn_f1
-                dnf1 = float(sklearn_f1(
+                # Restrict labels to odd indices so easy classes don't drag macro F1 to 0
+                difficult_labels = np.unique(all_labels_np[difficult_mask])
+                dnf1 = float(f1_score(
                     all_labels_np[difficult_mask],
                     all_preds_np[difficult_mask],
+                    labels=difficult_labels,
                     average="macro",
                     zero_division=1.0
                 ))
@@ -756,5 +923,46 @@ class NCTTrainer:
 
             result["difficult_node_accuracy"] = dna
             result["difficult_node_f1"] = dnf1
+
+            # Compute true WGA using real group labels (if provided by NCTClassifier)
+            if self.val_group_labels is not None:
+                nodes_per_class = max(1, num_groups // num_classes)
+                class_pred_true_wga = all_preds_np // nodes_per_class
+                class_true_true_wga = all_labels_np // nodes_per_class
+                vg = self.val_group_labels
+                unique_groups = np.unique(vg)
+                grp_accs = []
+                for g in unique_groups:
+                    mask = vg == g
+                    if mask.sum() > 0:
+                        grp_accs.append(
+                            float((class_pred_true_wga[mask] == class_true_true_wga[mask]).mean())
+                        )
+                if grp_accs:
+                    result["val_true_wga"] = min(grp_accs)
+
+                # Bias-collapsed true WGA (2*num_classes cells); None unless colors_per_class > 2
+                consolidated = compute_consolidated_group_metrics(
+                    vg,
+                    class_pred_true_wga,
+                    num_classes=num_classes,
+                    num_groups=int(len(unique_groups)),
+                )
+                if consolidated is not None:
+                    result["val_true_wga_consolidated"] = float(consolidated["worst_group_accuracy"])
+
+                if (
+                    compute_pseudo_auroc
+                    and num_classes == 2
+                    and len(all_probs) > 0
+                    and len(np.unique(class_true_true_wga)) == 2
+                ):
+                    score_pos = torch.cat(all_probs).numpy()[:, nodes_per_class:].sum(axis=1)
+                    try:
+                        result["val_true_auroc"] = float(
+                            roc_auc_score(class_true_true_wga, score_pos)
+                        )
+                    except ValueError:
+                        pass
 
         return result

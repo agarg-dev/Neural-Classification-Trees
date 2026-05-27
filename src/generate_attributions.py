@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nct import NCTClassifier
 
-# Updated list to match your new class capabilities
 SUPPORTED_METHODS = [
     "layer_gradcam", "guided_gradcam", "layer_conductance",
     "layer_integrated_gradients", "layer_gradient_x_activation",
@@ -72,8 +71,6 @@ def parse_args():
     parser.add_argument('--attribution_dir', type=str, default='./attributions', help="Root output directory")
     parser.add_argument('--num_per_node', type=int, default=5, help="Samples per node")
     parser.add_argument('--num_transitions', type=int, default=5, help="Transition samples")
-    
-    # Updated help text to reflect new keywords
     parser.add_argument('--methods', type=str, default='all_layer',
                        help='Comma-separated list or "all", "all_layer", "all_pixel".')
     return parser.parse_args()
@@ -90,21 +87,18 @@ def main():
     print(f"Global Output Directory: {base_run_dir}")
     print("=" * 70)
 
-    # 2. Determine Methods (Parse argument for the class)
+    # 2. Parse methods: special keywords pass through; comma-separated lists become a list.
     raw_input = args.methods.lower().strip()
-    
-    # Check for special keywords
     if raw_input in ['all', 'all_layer', 'all_pixel']:
         methods_arg = raw_input
     else:
-        # Create a list of strings
         methods_arg = [m.strip() for m in raw_input.split(',')]
 
-    # 3. Load Data and Model
+    # 3. Load data and model
     try:
         test_dataset = load_waterbird_data(args.data_dir)
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         print(f"Loading model from: {args.checkpoint}")
         classifier = NCTClassifier.from_checkpoint(args.checkpoint, device=device)
         print(f"Model loaded on {device}.")
@@ -112,15 +106,14 @@ def main():
         print(f"CRITICAL ERROR loading model or data: {e}")
         return
 
-    # 4. Run Visualization (Delegate to Class)
-    # Iteration results are loaded from checkpoint and stored in classifier._iteration_results
+    # 4. Run visualization (iteration_results were restored by from_checkpoint).
     try:
         classifier.generate_attribution_visualizations(
             X_test=test_dataset,
             save_dir=base_run_dir,
             num_per_node=args.num_per_node,
             num_transitions=args.num_transitions,
-            methods=methods_arg  # Pass the list or keyword here
+            methods=methods_arg,
         )
     except Exception as e:
         print(f">>> ERROR running visualizations: {e}")

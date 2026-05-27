@@ -1,50 +1,64 @@
-# NCT Configuration for Waterbird Dataset - Optuna
+# NCT Configuration for CelebA Dataset - DFR-style
+# Based on: celeba_nct.yaml
+
+
 
 # Training parameters
 num_iterations: 3
-epochs_per_iteration: [100, 100, 100]
+epochs_per_iteration: [1 , 50, 50]
 batch_size: 64
 seed: 42
 
 # Model architecture
 backbone: resnet50
 pretrained: true
-head_hidden_dim: 112 #128
-head_dropout: 0 #0.4
+head_hidden_dim: 128
+head_dropout: 0.3
+head_type: mlp
+split_node_head_type: true
 
 # Learning rates
-initial_base_lr: 5.0e-05
-initial_head_lr: 8.0e-06
-lr_decay_factor: 2.5
+initial_base_lr: 1.0e-05
+initial_head_lr: 0.0001
+lr_decay_factor: 1.5
 
 # Optimizer configuration
+# optimizer:
+#     type: adamw
+#     weight_decay: 0.1
+#     betas: [0.9, 0.999]
+#     eps: 1.0e-08
+
 optimizer:
-    type: adamw
+    type: sgd
     weight_decay: 0.1
-    betas: [0.9, 0.999]
+    momentum: 0.9
+    nesterov: false
+
 
 # Scheduler configuration
 scheduler:
     type: plateau
+    patience: 10
+    factor: 0.5
     eta_min: 1.0e-06
-    patience: 13
-    factor: 0.1
 
 # Loss and regularization
-use_class_weights: True
-min_samples_per_node: 25
+sampling_strategy: downsample
+use_class_weights: true
+skip_class_weights_iter1: false
 max_class_weight: 20.0
-regularization_type: elastic_net #l2
-lambda_l1: 0.001 # 0
-aux_loss_weight: 1.0
-node_balanced_sampling: False
+min_samples_per_node: 10
+regularization_type: l2
+lambda_l1: 0.0
+aux_loss_weight: 2
 
 # Training phases
-phase1_epochs_ratio: [1.0, 0.65, 0.65]
-phase1_patience: 15 #15
-phase2_patience: 15 #5
+phase1_epochs_ratio: [1, 0.3, 0.3]
+phase1_patience: 15
+phase2_patience: 15
 early_stopping: true
-model_selection_criterion: auto
+model_selection_criterion: iter2_wga
 
 # Routing strategy
 routing_strategy: correctness
@@ -62,9 +76,9 @@ verbose: 2
 
 # Wandb configuration
 wandb_enabled: true
-wandb_project: nct-waterbirds
+wandb_project: nct-celeba
 wandb_entity: ankurgarg-university-of-calgary-in-alberta
-wandb_tags: [arc, waterbirds, optuna, cosine]
+wandb_tags: [arc, celeba, dfr]
 
 # Checkpoint settings
 save_iteration_checkpoints: true

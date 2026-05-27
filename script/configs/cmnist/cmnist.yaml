@@ -1,0 +1,86 @@
+# CMNIST: Colored MNIST — 5-class digit classification (digit pairs), color as spurious attribute.
+# 99.5% bias-alignment in training: digit pairs are strongly correlated with specific colors.
+#
+# Based on Correct-N-Contrast paper (arXiv:2203.01517):
+#   - 5 classes: digit pairs (0,1)->0, (2,3)->1, (4,5)->2, (6,7)->3, (8,9)->4
+#   - 25 groups total: 5 classes × 5 colors (with 25-group WGA for CnC comparability)
+#   - 10 consolidated groups: easy/hard per class (for interpretability)
+#   - Preprocessing: Resize(40) → RandomCrop(32, padding=0) → HFlip → Normalize((0.5,0.5,0.5))
+#   - Eval: Resize(32) → Normalize((0.5,0.5,0.5))
+#
+# Hyperparameters from Optuna study nct_tune_cmnist
+# Best trial: #662  |  Val pseudo WGA (max over iter2/iter3): 0.6499
+# {'initial_base_lr': 0.002, 'initial_head_lr': 1e-05, 'lr_decay_factor': 1.0,
+#  'weight_decay': 5e-05, 'head_dropout': 0.2, 'head_hidden_dim': 64, 'head_type': 'linear',
+#  'split_node_head_type': True, 'sampling_strategy': 'geomean', 'loss_type': 'bce',
+#  'max_class_weight': 20.0, 'aux_loss_weight': 1.0,
+#  'phase1_ratio_iter1': 0.0, 'phase1_ratio_iter2': 0.2, 'phase1_ratio_iter3': 0.7}
+
+num_iterations: 3
+epochs_per_iteration: [2, 50, 50]
+batch_size: 64
+num_classes: 5
+seed: 42
+
+# Model architecture
+backbone: lenet5
+pretrained: false
+head_hidden_dim: 64
+head_dropout: 0.2
+head_type: linear
+split_node_head_type: true
+
+# Learning rates (higher since training from scratch)
+initial_base_lr: 2.0e-03
+initial_head_lr: 1.0e-05
+lr_decay_factor: 1.0
+
+# Optimizer configuration
+optimizer:
+  type: adamw
+  weight_decay: 5.0e-05
+
+# Scheduler configuration
+scheduler:
+  type: plateau
+  patience: 5
+  factor: 0.5
+
+# Loss and regularization
+use_class_weights: true
+skip_class_weights_iter1: true
+max_class_weight: 20.0
+regularization_type: l2
+aux_loss_weight: 1.0
+
+# Training phases
+phase1_epochs_ratio: [0.0, 0.2, 0.7]
+phase1_patience: 10
+phase2_patience: 5
+early_stopping: false
+model_selection_criterion: iter2_wga
+depth_selection_enabled: true
+depth_selection_confidence: 1.96   # optional, this is the default
+
+# Architecture
+hierarchical_architecture: correct_label_routing
+routing_strategy: correctness
+sampling_strategy: geomean
+
+# Data parameters
+image_size: 32
+num_workers: 4
+pin_memory: true
+verbose: 2
+
+# Checkpointing and logging
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions
+log_attributions: true
+log_epoch_metrics: true
+
+# Wandb
+wandb_enabled: true
+wandb_project: nct-cmnist
+wandb_entity: ankurgarg-university-of-calgary-in-alberta
+wandb_tags: [cmnist, optuna-best, trial662]

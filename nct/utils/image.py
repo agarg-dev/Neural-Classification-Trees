@@ -17,21 +17,9 @@ def denormalize_image(
     mean: Optional[Tuple[float, ...]] = None,
     std: Optional[Tuple[float, ...]] = None,
 ) -> np.ndarray:
-    """
-    Denormalize image tensor to uint8 numpy array.
-
-    Args:
-        tensor: Image tensor (C, H, W) - supports both RGB (3 channels) and grayscale (1 channel)
-        mean: Normalization mean (auto-detected from channels if None)
-        std: Normalization std (auto-detected from channels if None)
-
-    Returns:
-        Image as uint8 array (H, W, C) in [0, 255] range
-        For grayscale, returns (H, W, 3) by repeating the channel for visualization
-    """
+    """Tensor (C,H,W) → uint8 (H,W,3). Grayscale is repeated 3× for display; mean/std auto from channels."""
     num_channels = tensor.shape[0]
 
-    # Auto-detect normalization stats if not provided
     if mean is None or std is None:
         if num_channels == 1:
             mean = MNIST_MEAN
@@ -61,21 +49,9 @@ def tensor_to_rgb(
     mean: Optional[Tuple[float, ...]] = None,
     std: Optional[Tuple[float, ...]] = None,
 ) -> np.ndarray:
-    """
-    Convert normalized tensor to RGB float array.
-
-    Args:
-        tensor: Image tensor (C, H, W) - supports both RGB (3 channels) and grayscale (1 channel)
-        mean: Normalization mean (auto-detected from channels if None)
-        std: Normalization std (auto-detected from channels if None)
-
-    Returns:
-        RGB image as float array (H, W, C) in [0, 1] range
-        For grayscale, returns (H, W, 3) by repeating the channel for visualization
-    """
+    """Tensor (C,H,W) → float (H,W,3) in [0,1]. Grayscale is repeated 3× for display."""
     num_channels = tensor.shape[0]
 
-    # Auto-detect normalization stats if not provided
     if mean is None or std is None:
         if num_channels == 1:
             mean = MNIST_MEAN

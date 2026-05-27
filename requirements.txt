@@ -1,6 +1,5 @@
-# Neural Classification Trees - Requirements for Compute Canada
-# ============================================================
-# Install with: pip install --no-index -r requirements.txt
+# Neural Classification Trees - dependencies
+# Install with: pip install -r requirements.txt
 
 # Core
 torch==2.9.1
@@ -8,7 +7,7 @@ torchvision==0.24.1
 numpy==2.3.3
 pandas==2.3.3
 scikit-learn==1.7.1
-Pillow-SIMD==9.5.0.post2
+Pillow==9.5.0
 
 # Visualization
 tqdm==4.67.1

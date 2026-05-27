@@ -1,9 +1,10 @@
 """Data loading utilities."""
 
+import math
 from typing import Optional
 
 import torch
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, Sampler, WeightedRandomSampler
 
 
 def create_data_loader(
@@ -16,25 +17,7 @@ def create_data_loader(
     generator: Optional[torch.Generator] = None,
     **kwargs,
 ) -> DataLoader:
-    """
-    Create a DataLoader from a PyTorch Dataset.
-
-    Args:
-        data: PyTorch Dataset object.
-        is_training: Whether this is training data (affects shuffling and drop_last).
-        batch_size: Batch size for data loader.
-        num_workers: Number of worker processes for data loading.
-        pin_memory: Whether to pin memory for faster GPU transfer.
-        seed: Random seed for shuffling.
-        generator: Optional persistent generator for reproducible shuffling.
-        **kwargs: Additional arguments (ignored, kept for backward compatibility).
-
-    Returns:
-        DataLoader: Configured data loader with optimizations:
-            - persistent_workers=True: Workers persist across epochs (faster)
-            - prefetch_factor=4: Each worker prefetches 4 batches (reduces GPU idle)
-            - drop_last=True (training only): Drops incomplete last batch for stability
-    """
+    """Create a DataLoader from a PyTorch Dataset."""
     if generator is None:
         generator = torch.Generator()
         if seed is not None:
@@ -53,14 +36,105 @@ def create_data_loader(
     )
 
 
-def create_node_balanced_sampler(node_labels: torch.Tensor) -> WeightedRandomSampler:
-    """
-    Create sampler that balances across nodes for DFR-style training.
-
-    Each node gets equal sampling probability, so minority nodes
-    (hard samples) appear as often as majority nodes (easy samples).
-    """
+def create_node_upsample_sampler(
+    node_labels: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+) -> WeightedRandomSampler:
+    """Create sampler that balances across nodes via weighted oversampling."""
     num_nodes = node_labels.max().item() + 1
     node_counts = torch.bincount(node_labels, minlength=num_nodes).float()
     sample_weights = 1.0 / node_counts[node_labels]
-    return WeightedRandomSampler(sample_weights, len(node_labels), replacement=True)
+    return WeightedRandomSampler(
+        sample_weights, len(node_labels), replacement=True, generator=generator
+    )
+
+
+class NodeDownsampleSampler(Sampler):
+    """Node-balanced sampler that draws a fresh random subsample each epoch
+    by downsampling all nodes to the smallest node's count.
+
+    # DataLoader calls iter() once per epoch — fresh subsample each call.
+    """
+
+    def __init__(
+        self,
+        node_labels: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+        self.generator = generator
+
+        num_nodes = node_labels.max().item() + 1
+        self._node_indices = [
+            (node_labels == n).nonzero(as_tuple=True)[0] for n in range(num_nodes)
+        ]
+        self._nonempty = [idx for idx in self._node_indices if len(idx) > 0]
+        self._min_count = min(len(idx) for idx in self._nonempty)
+
+    def __iter__(self):
+        """Fresh balanced subsample every epoch."""
+        selected = []
+        for idx in self._nonempty:
+            perm = torch.randperm(len(idx), generator=self.generator)
+            selected.append(idx[perm[: self._min_count]])
+        selected = torch.cat(selected)
+        final_perm = torch.randperm(len(selected), generator=self.generator)
+        yield from selected[final_perm].tolist()
+
+    def __len__(self) -> int:
+        return self._min_count * len(self._nonempty)
+
+
+def create_node_downsample_sampler(
+    node_labels: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+) -> NodeDownsampleSampler:
+    """Create a node-balanced sampler that downsamples all nodes to the smallest node's count."""
+    return NodeDownsampleSampler(node_labels, generator=generator)
+
+
+class NodeGeomeanSampler(Sampler):
+    """Geometric-mean node sampler: all non-empty nodes contribute N_target samples
+    per epoch, where N_target = geometric mean of non-empty node sizes."""
+
+    def __init__(
+        self,
+        node_labels: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> None:
+        self.generator = generator
+
+        num_nodes = int(node_labels.max().item()) + 1
+        all_indices = [
+            (node_labels == n).nonzero(as_tuple=True)[0] for n in range(num_nodes)
+        ]
+        self._nonempty = [idx for idx in all_indices if len(idx) > 0]
+
+        sizes = [len(idx) for idx in self._nonempty]
+        log_mean = sum(math.log(s) for s in sizes) / len(sizes)
+        self._target: int = max(1, int(round(math.exp(log_mean))))
+
+    def __iter__(self):
+        """Fresh per-epoch sample: downsample large nodes, oversample small ones."""
+        selected = []
+        for idx in self._nonempty:
+            n = len(idx)
+            if n >= self._target:
+                perm = torch.randperm(n, generator=self.generator)
+                selected.append(idx[perm[: self._target]])
+            else:
+                rep = torch.randint(n, (self._target,), generator=self.generator)
+                selected.append(idx[rep])
+        selected = torch.cat(selected)
+        final_perm = torch.randperm(len(selected), generator=self.generator)
+        yield from selected[final_perm].tolist()
+
+    def __len__(self) -> int:
+        return self._target * len(self._nonempty)
+
+
+def create_node_geomean_sampler(
+    node_labels: torch.Tensor,
+    generator: Optional[torch.Generator] = None,
+) -> NodeGeomeanSampler:
+    """Create a geometric-mean node sampler."""
+    return NodeGeomeanSampler(node_labels, generator=generator)

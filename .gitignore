@@ -39,11 +39,15 @@ ENV/
 # Project-specific
 checkpoints/
 outputs/
+attributions/
 data/
 wandb/
 *.pt
 *.pth
 *.ckpt
+
+# Claude Code local data
+.claude/
 
 # Logs
 *.log
@@ -57,4 +61,18 @@ Thumbs.db
 *.db
 optuna_studies/
 
+# Local cluster (SLURM / Compute Canada) submit scripts
+script/slurm/
+
+# Paper material, baselines, and local-only release copy
 icml/
+neurips/
+baselines/
+nct-release/
+CLAUDE.md
+
+# Archived / superseded files (any directory named "old")
+old/
+
+# Hyperparameter tuning scripts (local only)
+src/tune/

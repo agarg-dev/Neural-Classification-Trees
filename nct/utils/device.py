@@ -5,16 +5,7 @@ from typing import Optional, Union
 
 
 def get_device(device: Optional[Union[str, torch.device]] = None) -> torch.device:
-    """
-    Get the appropriate device for PyTorch operations.
-
-    Args:
-        device: Specific device to use. If None or 'auto', will auto-detect
-                the best available device (CUDA if available, else CPU).
-
-    Returns:
-        torch.device: The device to use for computations
-    """
+    """Resolve a device spec. None or 'auto' picks CUDA if available, else CPU."""
     if device is None or device == 'auto':
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -25,15 +16,7 @@ def get_device(device: Optional[Union[str, torch.device]] = None) -> torch.devic
 
 
 def get_device_info(device: Optional[torch.device] = None) -> dict:
-    """
-    Get information about the current device.
-
-    Args:
-        device: Device to get info for. If None, uses the default device.
-
-    Returns:
-        dict: Device information including name, memory, etc.
-    """
+    """Dict of name / memory stats for `device` (defaults to the active device)."""
     if device is None:
         device = get_device()
 

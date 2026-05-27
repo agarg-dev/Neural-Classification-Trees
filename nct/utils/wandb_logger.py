@@ -19,14 +19,6 @@ class WandbLogger:
     def __init__(
         self, config: Dict[str, Any], wandb_config: Dict[str, Any], verbose: int = 1
     ):
-        """
-        Initialize wandb logger.
-
-        Args:
-            config: Training configuration to log
-            wandb_config: Wandb-specific config (project, entity, run_name, tags)
-            verbose: Verbosity level for warnings
-        """
         self.verbose = verbose
         self.wandb_config = wandb_config
         self.run = None
@@ -38,7 +30,6 @@ class WandbLogger:
             self.enabled = False
             return
 
-        # Initialize wandb run
         self.run = wandb.init(
             project=wandb_config.get("project", "nct-experiments"),
             entity=wandb_config.get("entity"),
@@ -66,19 +57,24 @@ class WandbLogger:
         val_aux_loss: float = 0.0,
         difficult_node_acc: float = 0.0,
         difficult_node_f1: float = 0.0,
+        iter2_level_wga: Optional[float] = None,
+        iter2_level_auroc: Optional[float] = None,
+        iter2_level_dna: Optional[float] = None,
+        iter2_level_dnf1: Optional[float] = None,
     ):
         """Log per-epoch metrics to wandb including auxiliary loss, DNA, and DNF1."""
         if not self.enabled or not self.run:
             return
 
+        # Use "pseudo_" prefix to distinguish from true WGA logged in log_iteration_summary
         metrics = {
             f"iteration_{iteration}/phase_{phase}/train_loss": train_loss,
             f"iteration_{iteration}/phase_{phase}/val_loss": val_loss,
             f"iteration_{iteration}/phase_{phase}/val_accuracy": val_acc,
             f"iteration_{iteration}/phase_{phase}/val_f1": val_f1,
-            f"iteration_{iteration}/phase_{phase}/worst_group_accuracy": worst_group_acc,
-            f"iteration_{iteration}/phase_{phase}/difficult_node_accuracy": difficult_node_acc,
-            f"iteration_{iteration}/phase_{phase}/difficult_node_f1": difficult_node_f1,
+            f"iteration_{iteration}/phase_{phase}/pseudo_worst_group_accuracy": worst_group_acc,
+            f"iteration_{iteration}/phase_{phase}/pseudo_difficult_node_accuracy": difficult_node_acc,
+            f"iteration_{iteration}/phase_{phase}/pseudo_difficult_node_f1": difficult_node_f1,
             f"iteration_{iteration}/phase_{phase}/base_lr": base_lr,
             f"iteration_{iteration}/phase_{phase}/head_lr": head_lr,
             "epoch": epoch,
@@ -92,6 +88,26 @@ class WandbLogger:
             )
             metrics[f"iteration_{iteration}/phase_{phase}/val_aux_loss"] = val_aux_loss
 
+        # Iteration-2-level pseudo metrics are meaningful from iteration 3 onward.
+        if iteration >= 3 and iter2_level_wga is not None:
+            metrics[
+                f"iteration_{iteration}/phase_{phase}/iter2_pseudo_worst_group_accuracy"
+            ] = iter2_level_wga
+        if iteration >= 3 and iter2_level_dna is not None:
+            metrics[
+                f"iteration_{iteration}/phase_{phase}/iter2_pseudo_difficult_node_accuracy"
+            ] = iter2_level_dna
+        if iteration >= 3 and iter2_level_dnf1 is not None:
+            metrics[
+                f"iteration_{iteration}/phase_{phase}/iter2_pseudo_difficult_node_f1"
+            ] = iter2_level_dnf1
+
+        # Iter-2-level pseudo AUROC (meaningful from iteration 2 onward).
+        if iteration >= 2 and iter2_level_auroc is not None and not math.isnan(iter2_level_auroc):
+            metrics[
+                f"iteration_{iteration}/phase_{phase}/iter2_level_worst_group_auroc"
+            ] = iter2_level_auroc
+
         # Add per-group accuracies
         for group_id, acc in group_accuracies.items():
             metrics[
@@ -99,6 +115,18 @@ class WandbLogger:
             ] = acc
 
         wandb.log(metrics)
+
+    def log_wga_spearman(self, spearman_r: float, n_epochs: int, variant: str = "full"):
+        """Log Spearman of val pseudo-WGA vs true WGA ('full' or 'consolidated')."""
+        if not self.enabled or not self.run:
+            return
+        suffix = "" if variant == "full" else f"_{variant}"
+        wandb.log({
+            f"wga_correlation/spearman_r{suffix}": spearman_r,
+            f"wga_correlation/n_epochs{suffix}": n_epochs,
+        })
+        if self.run:
+            self.run.summary[f"wga_spearman_r{suffix}"] = spearman_r
 
     def log_iteration_summary(
         self,
@@ -109,6 +137,7 @@ class WandbLogger:
         training_time: float,
         num_epochs_trained: int,
         early_stopped: bool,
+        consolidated_group_metrics: Optional[Dict[str, Any]] = None,
     ):
         """Log summary metrics after iteration completes."""
         if not self.enabled or not self.run:
@@ -142,6 +171,10 @@ class WandbLogger:
             metrics[f"iteration_{iteration}/pseudo_difficult_node_acc"] = test_metrics["pseudo_difficult_node_acc"]
         if "pseudo_worst_group_acc" in test_metrics:
             metrics[f"iteration_{iteration}/pseudo_worst_group_acc"] = test_metrics["pseudo_worst_group_acc"]
+        if "pseudo_iter2_level_worst_group_acc" in test_metrics:
+            metrics[f"iteration_{iteration}/pseudo_iter2_level_worst_group_acc"] = test_metrics[
+                "pseudo_iter2_level_worst_group_acc"
+            ]
 
         # Add group metrics
         if group_metrics is not None and "summary" in group_metrics:
@@ -168,6 +201,20 @@ class WandbLogger:
                 )
                 metrics[f"iteration_{iteration}/mean_group_auroc"] = summary.get(
                     "mean_group_auroc", 0
+                )
+
+        # Add consolidated group metrics if available (CMNIST and similar multi-spurious datasets)
+        if consolidated_group_metrics is not None:
+            metrics[f"iteration_{iteration}/consolidated_worst_group_accuracy"] = (
+                consolidated_group_metrics.get("worst_group_accuracy", 0)
+            )
+            per_class = consolidated_group_metrics.get("per_class", {})
+            for class_id, class_metrics in per_class.items():
+                metrics[f"iteration_{iteration}/consolidated_class_{class_id}_aligned_accuracy"] = (
+                    class_metrics.get("aligned_accuracy", 0)
+                )
+                metrics[f"iteration_{iteration}/consolidated_class_{class_id}_conflicting_accuracy"] = (
+                    class_metrics.get("conflicting_accuracy", 0)
                 )
 
         # Add per-group test accuracies and AUROC
@@ -281,20 +328,44 @@ class WandbLogger:
         }
         wandb.log(metrics)
 
-    def log_routing_statistics(self, routing_stats: Dict[str, int]):
-        """Log routing statistics for correctness_certainty routing."""
+    def log_depth_selection_summary(
+        self,
+        enabled: bool,
+        selected_iter: Optional[int],
+        headline_iter: Optional[int],
+        stop_reason: str,
+        per_iter_stats: Dict[int, Dict[str, Any]],
+        last_trained_iter: int,
+        num_iterations: int,
+        early_stopped: bool,
+        metric: str = "wga",
+    ) -> None:
         if not self.enabled or not self.run:
             return
 
-        wandb.log(
-            {
-                "routing/num_wrong": routing_stats["num_wrong"],
-                "routing/num_uncertain": routing_stats["num_uncertain"],
-                "routing/num_difficult": routing_stats["num_difficult"],
-                "routing/difficult_ratio": routing_stats["num_difficult"]
-                / routing_stats["total"],
-            }
-        )
+        summary = self.run.summary
+        value_key = f"pseudo_{metric}"
+        summary["depth_selection/enabled"] = enabled
+        summary["depth_selection/metric"] = metric
+        summary["depth_selection/early_stopped"] = early_stopped
+        summary["depth_selection/last_trained_iter"] = last_trained_iter
+        summary["depth_selection/num_iterations"] = num_iterations
+        summary["depth_selection/stop_reason"] = stop_reason
+        if selected_iter is not None:
+            summary["depth_selection/selected_iter"] = selected_iter
+        if headline_iter is not None:
+            summary["depth_selection/headline_iter"] = headline_iter
+
+        for it, st in per_iter_stats.items():
+            prefix = f"depth_selection/iter_{it}"
+            if st.get("value") is not None:
+                summary[f"{prefix}/{value_key}"] = st["value"]
+            if st.get("n_worst") is not None:
+                summary[f"{prefix}/n_worst"] = st["n_worst"]
+            if st.get("epsilon") is not None:
+                summary[f"{prefix}/epsilon"] = st["epsilon"]
+            if st.get("decision") is not None:
+                summary[f"{prefix}/decision"] = st["decision"]
 
     def finish(self, total_training_time: Optional[float] = None):
         """Finish wandb run and set summary metrics for easy dashboard access."""

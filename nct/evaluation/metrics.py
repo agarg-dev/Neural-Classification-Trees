@@ -22,23 +22,9 @@ def calculate_basic_metrics(
     y_prob: Optional[np.ndarray] = None,
     average: str = "binary",
 ) -> Dict[str, float]:
-    """
-    Calculate basic classification metrics.
-
-    Args:
-        y_true: True labels (numpy array)
-        y_pred: Predicted labels (numpy array)
-        y_prob: Predicted probabilities for positive class (numpy array, optional).
-                Required for AUROC computation.
-        average: Averaging strategy for multi-class metrics
-
-    Returns:
-        Dict[str, float]: Dictionary of metrics including AUROC if y_prob provided
-    """
-
-    # Auto-detect if multiclass and adjust averaging
-    # Check both y_true and y_pred to handle edge cases where model
-    # predicts only a subset of classes or predicts extra classes
+    """Accuracy / precision / recall / F1; AUROC too if y_prob is given."""
+    # Take max(unique in true, unique in pred) so we still detect multi-class
+    # when the model predicts a subset of classes or extra ones.
     num_classes_true = len(np.unique(y_true))
     num_classes_pred = len(np.unique(y_pred))
     num_classes = max(num_classes_true, num_classes_pred)
@@ -76,21 +62,7 @@ def calculate_subgroup_auroc(
     y_prob: np.ndarray,
     subgroups: Optional[Dict[str, np.ndarray]] = None,
 ) -> Dict[str, float]:
-    """
-    Calculate AUROC for different subgroups.
-
-    For ISIC dataset, computes:
-    - non_patch_auroc: AUROC on samples without colored patches
-    - histopath_auroc: AUROC on samples with histopathology confirmation
-
-    Args:
-        y_true: True binary labels (numpy array)
-        y_prob: Predicted probabilities for positive class (numpy array)
-        subgroups: Dictionary of boolean masks (e.g., {"non_patch": ..., "histopath": ...})
-
-    Returns:
-        Dict[str, float]: Subgroup AUROC metrics
-    """
+    """Per-subgroup AUROC (used by ISIC: non_patch / histopath subgroups)."""
     if subgroups is None:
         return {}
 
@@ -124,21 +96,7 @@ def calculate_group_metrics(
     y_prob: Optional[np.ndarray] = None,
     group_names: Optional[Dict[int, str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Calculate metrics for different groups/subpopulations.
-
-    Args:
-        y_true: True binary labels (numpy array)
-        y_pred: Predicted binary labels (numpy array)
-        group_labels: Group/subpopulation labels (numpy array)
-        y_prob: Predicted probabilities for positive class (numpy array, optional).
-                Required for per-group AUROC computation.
-        group_names: Optional mapping from group IDs to names
-
-    Returns:
-        Dict[str, Any]: Group-specific metrics including per-group AUROC if y_prob provided
-    """
-
+    """Per-group metrics + worst-group summary. Per-group AUROC included if y_prob is given."""
     group_metrics = {}
     group_accuracies = []
     group_aurocs = []
@@ -168,6 +126,12 @@ def calculate_group_metrics(
         accuracy = accuracy_score(group_true, group_pred)
         group_accuracies.append(accuracy)
 
+        # Dominant true class in the group (robust to asymmetric splits like
+        # ISIC where Benign has 2 subgroups but Malignant has 1, so
+        # group_id // num_attrs_per_class does not recover the correct class).
+        vals, counts = np.unique(group_true, return_counts=True)
+        y_class = int(vals[np.argmax(counts)]) if len(vals) > 0 else -1
+
         group_metrics[group_name] = {
             "accuracy": accuracy,
             "precision": precision_score(group_true, group_pred, average=average, zero_division=0),
@@ -175,6 +139,7 @@ def calculate_group_metrics(
             "f1_score": f1_score(group_true, group_pred, average=average, zero_division=0),
             "support": len(group_true),
             "group_id": int(group_id),
+            "y_class": y_class,
         }
 
         # Calculate per-group AUROC if probabilities provided
@@ -218,6 +183,77 @@ def calculate_group_metrics(
         summary["mean_group_auroc"] = float(np.mean(group_aurocs))
 
     return {"group_metrics": group_metrics, "summary": summary}
+
+
+def compute_consolidated_group_metrics(
+    group_labels: np.ndarray,
+    y_pred: np.ndarray,
+    num_classes: int = 5,
+    num_groups: int = 25,
+) -> Optional[Dict[str, Any]]:
+    """
+    Compute consolidated group metrics for multi-class datasets with spurious attributes.
+
+    For CMNIST (5 classes × 5 colors = 25 groups), consolidates to 10 groups:
+    - For each class: aligned (color matches class) and conflicting (color doesn't match)
+    - Consolidated group: y * 2 + is_conflicting
+
+    Returns None when num_spurious <= 2 (binary spurious already gives a 2*num_classes split).
+    """
+    num_spurious = num_groups // num_classes
+
+    if num_spurious <= 2:
+        return None
+
+    consolidated_groups = []
+    y_true_from_groups = []
+    for group_id in group_labels:
+        y_from_group = group_id // num_spurious
+        attr_id = group_id % num_spurious
+        is_conflicting = 1 if attr_id != y_from_group else 0
+        consolidated_group = y_from_group * 2 + is_conflicting
+        consolidated_groups.append(consolidated_group)
+        y_true_from_groups.append(y_from_group)
+
+    consolidated_groups = np.array(consolidated_groups)
+    y_true_from_groups = np.array(y_true_from_groups)
+
+    per_class_metrics = {}
+    consolidated_accuracies = []
+
+    for class_id in range(num_classes):
+        aligned_mask = consolidated_groups == (class_id * 2)
+        conflicting_mask = consolidated_groups == (class_id * 2 + 1)
+
+        if np.sum(aligned_mask) > 0:
+            aligned_acc = float(np.mean(y_pred[aligned_mask] == y_true_from_groups[aligned_mask]))
+        else:
+            aligned_acc = np.nan
+
+        if np.sum(conflicting_mask) > 0:
+            conflicting_acc = float(np.mean(y_pred[conflicting_mask] == y_true_from_groups[conflicting_mask]))
+        else:
+            conflicting_acc = np.nan
+
+        per_class_metrics[class_id] = {
+            "aligned_accuracy": aligned_acc,
+            "conflicting_accuracy": conflicting_acc,
+            "aligned_support": int(np.sum(aligned_mask)),
+            "conflicting_support": int(np.sum(conflicting_mask)),
+        }
+
+        if not np.isnan(aligned_acc):
+            consolidated_accuracies.append(aligned_acc)
+        if not np.isnan(conflicting_acc):
+            consolidated_accuracies.append(conflicting_acc)
+
+    worst_group_accuracy = float(np.min(consolidated_accuracies)) if consolidated_accuracies else 0.0
+
+    return {
+        "worst_group_accuracy": worst_group_accuracy,
+        "per_class": per_class_metrics,
+        "consolidated_groups": consolidated_groups.tolist(),
+    }
 
 
 def calculate_hierarchical_metrics(
@@ -276,16 +312,7 @@ def calculate_hierarchical_metrics(
 def _compute_transition_stats(
     prev_correct: np.ndarray, curr_correct: np.ndarray
 ) -> Dict[str, Any]:
-    """
-    Helper to compute transition statistics and rates.
-
-    Args:
-        prev_correct: Boolean array of correct predictions from previous iteration
-        curr_correct: Boolean array of correct predictions from current iteration
-
-    Returns:
-        Dictionary with transition counts and rates
-    """
+    """Counts + rates of correct↔incorrect transitions between two iterations."""
     correct_to_incorrect = int(np.sum(prev_correct & ~curr_correct))
     incorrect_to_correct = int(np.sum(~prev_correct & curr_correct))
     correct_to_correct = int(np.sum(prev_correct & curr_correct))
@@ -325,18 +352,7 @@ def compute_iteration_transitions(
     labels: np.ndarray,
     group_labels: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
-    """
-    Compute prediction transitions between consecutive iterations.
-
-    Args:
-        prev_predictions: Predictions from previous iteration (numpy array)
-        curr_predictions: Predictions from current iteration (numpy array)
-        labels: Ground truth labels (numpy array)
-        group_labels: Optional group labels for per-group analysis (numpy array)
-
-    Returns:
-        Dictionary containing transition statistics with counts and rates
-    """
+    """Prediction transitions between consecutive iterations; per-group when group_labels given."""
 
     prev_correct = prev_predictions == labels
     curr_correct = curr_predictions == labels
@@ -369,20 +385,10 @@ def compute_difficult_node_accuracy(
     true_pseudo_labels: np.ndarray,
     predicted_pseudo_labels: np.ndarray,
 ) -> float:
-    """
-    Compute accuracy on difficult nodes only (odd-indexed nodes).
+    """Accuracy on difficult nodes (odd indices) only; returns 1.0 if there are no difficult samples.
 
-    Difficult nodes are those where samples were routed due to incorrect predictions
-    in the previous iteration. This metric is robust to small noisy nodes as they
-    contribute proportionally to their size rather than dominating like in WGA.
-
-    Args:
-        true_pseudo_labels: Ground truth pseudo labels from previous iteration
-        predicted_pseudo_labels: Predicted routing from current iteration
-
-    Returns:
-        Accuracy on difficult nodes (float between 0 and 1).
-        Returns 1.0 if no difficult samples exist.
+    More robust than WGA to small noisy nodes: contribution is proportional to size
+    rather than min-of-min.
     """
     # Difficult nodes have odd indices (1, 3, 5, 7, ...)
     difficult_mask = (true_pseudo_labels % 2 == 1)
@@ -400,54 +406,83 @@ def compute_difficult_node_f1(
     true_pseudo_labels: np.ndarray,
     predicted_pseudo_labels: np.ndarray,
 ) -> float:
-    """
-    Compute F1 score on difficult nodes only (odd-indexed nodes).
-
-    Difficult nodes are those where samples were routed due to incorrect predictions
-    in the previous iteration. F1 score provides a balance between precision and recall
-    for difficult node classification.
-
-    Args:
-        true_pseudo_labels: Ground truth pseudo labels from previous iteration
-        predicted_pseudo_labels: Predicted routing from current iteration
-
-    Returns:
-        F1 score on difficult nodes (float between 0 and 1).
-        Returns 1.0 if no difficult samples exist.
-    """
+    """Macro F1 over difficult nodes (odd indices) only; returns 1.0 if there are no difficult samples."""
     # Difficult nodes have odd indices (1, 3, 5, 7, ...)
     difficult_mask = (true_pseudo_labels % 2 == 1)
 
     if np.sum(difficult_mask) == 0:
         return 1.0  # No difficult samples = perfect routing
 
+    # Only include difficult classes (odd indices) in macro average
+    # to avoid F1=0 for easy classes dragging down the metric
+    difficult_labels = np.unique(true_pseudo_labels[difficult_mask])
     return float(f1_score(
         true_pseudo_labels[difficult_mask],
         predicted_pseudo_labels[difficult_mask],
+        labels=difficult_labels,
         average="macro",
         zero_division=1.0
     ))
+
+
+def _compute_per_group_routing_stats(
+    true_labels: np.ndarray,
+    predicted_labels: np.ndarray,
+    num_expected_groups: int,
+    min_samples_threshold: int = 0,
+) -> Dict[str, Any]:
+    """Compute per-group routing stats used by pseudo-label metrics."""
+    group_accs_all = {}
+    group_accs_filled = {}
+    node_sizes = {}
+    per_node_accuracy = {}
+
+    min_required = max(1, min_samples_threshold)
+
+    for gid in range(num_expected_groups):
+        mask = true_labels == gid
+        node_size = int(np.sum(mask))
+        node_sizes[int(gid)] = node_size
+
+        if node_size > 0:
+            acc = float(accuracy_score(true_labels[mask], predicted_labels[mask]))
+            group_accs_all[int(gid)] = acc
+            per_node_accuracy[int(gid)] = acc
+            if node_size >= min_required:
+                group_accs_filled[int(gid)] = acc
+        else:
+            group_accs_all[int(gid)] = 0.0
+            per_node_accuracy[int(gid)] = 0.0
+
+    return {
+        "group_accuracies": group_accs_all,
+        "group_accuracies_filled": group_accs_filled,
+        "node_sizes": node_sizes,
+        "per_node_accuracy": per_node_accuracy,
+        "worst_group_accuracy": float(min(group_accs_all.values()))
+        if group_accs_all
+        else 0.0,
+        "worst_group_accuracy_filled": float(min(group_accs_filled.values()))
+        if group_accs_filled
+        else 0.0,
+        "num_filled_classes": len(group_accs_filled),
+        "num_expected_classes": num_expected_groups,
+    }
 
 
 def compute_pseudo_label_metrics(
     true_pseudo_labels: np.ndarray,
     predicted_pseudo_labels: np.ndarray,
     num_expected_classes: int,
+    min_samples_threshold: int = 0,
+    base_num_classes: Optional[int] = None,
+    routing_probs: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
-    """
-    Compute pseudo label metrics (multi-class routing accuracy).
+    """Routing-quality metrics: accuracy, F1, worst pseudo-group acc, difficult-node acc/F1, per-node sizes.
 
-    Works for any number of iterations (2^n classes for n iterations).
-
-    Args:
-        true_pseudo_labels: Ground truth pseudo labels from previous iteration
-        predicted_pseudo_labels: Predicted routing from current iteration
-        num_expected_classes: Expected number of classes (should be 2^iteration)
-
-    Returns:
-        Dict with accuracy, F1, worst pseudo-group accuracy (all classes),
-        worst pseudo-group accuracy (filled classes only), difficult node accuracy,
-        per-node sizes, and per-node accuracies.
+    When base_num_classes is given (and iteration >= 2), also computes iter2-level
+    collapsed metrics. routing_probs additionally enables iter2-level worst-group AUROC.
+    A class is "filled" if it has >= min_samples_threshold samples.
     """
     from sklearn.metrics import accuracy_score, f1_score
 
@@ -457,29 +492,12 @@ def compute_pseudo_label_metrics(
     # Multi-class F1 (macro average)
     f1 = f1_score(true_pseudo_labels, predicted_pseudo_labels, average="macro")
 
-    # Per-class accuracy and sizes for ALL expected classes
-    group_accs_all = {}
-    group_accs_filled = {}
-    node_sizes = {}
-    per_node_accuracy = {}
-
-    for gid in range(num_expected_classes):
-        mask = true_pseudo_labels == gid
-        node_size = int(np.sum(mask))
-        node_sizes[int(gid)] = node_size
-
-        if node_size > 0:
-            # Class exists in training data
-            acc = float(
-                accuracy_score(true_pseudo_labels[mask], predicted_pseudo_labels[mask])
-            )
-            group_accs_all[int(gid)] = acc
-            group_accs_filled[int(gid)] = acc
-            per_node_accuracy[int(gid)] = acc
-        else:
-            # Class missing from training data = 0% accuracy
-            group_accs_all[int(gid)] = 0.0
-            per_node_accuracy[int(gid)] = 0.0
+    node_level_stats = _compute_per_group_routing_stats(
+        true_pseudo_labels,
+        predicted_pseudo_labels,
+        num_expected_classes,
+        min_samples_threshold,
+    )
 
     # Compute difficult node accuracy (DNA) and F1
     difficult_node_accuracy = compute_difficult_node_accuracy(
@@ -489,23 +507,144 @@ def compute_pseudo_label_metrics(
         true_pseudo_labels, predicted_pseudo_labels
     )
 
-    return {
+    results = {
         "accuracy": float(accuracy),
         "f1_score": float(f1),
-        "worst_group_accuracy": float(min(group_accs_all.values()))
-        if group_accs_all
-        else 0.0,
-        "worst_group_accuracy_filled": float(min(group_accs_filled.values()))
-        if group_accs_filled
-        else 0.0,
+        "worst_group_accuracy": node_level_stats["worst_group_accuracy"],
+        "worst_group_accuracy_filled": node_level_stats[
+            "worst_group_accuracy_filled"
+        ],
         "difficult_node_accuracy": difficult_node_accuracy,
         "difficult_node_f1": difficult_node_f1,
-        "group_accuracies": group_accs_all,
-        "node_sizes": node_sizes,
-        "per_node_accuracy": per_node_accuracy,
-        "num_filled_classes": len(group_accs_filled),
-        "num_expected_classes": num_expected_classes,
+        "group_accuracies": node_level_stats["group_accuracies"],
+        "node_sizes": node_level_stats["node_sizes"],
+        "per_node_accuracy": node_level_stats["per_node_accuracy"],
+        "num_filled_classes": node_level_stats["num_filled_classes"],
+        "num_expected_classes": node_level_stats["num_expected_classes"],
     }
+
+    # Iteration-2-level collapsed routing metrics (e.g., 8->4, 16->4 for binary).
+    if base_num_classes is not None and base_num_classes > 0:
+        iter2_expected_classes = int(base_num_classes) * 2
+        if (
+            num_expected_classes >= iter2_expected_classes
+            and num_expected_classes % iter2_expected_classes == 0
+        ):
+            collapse_factor = num_expected_classes // iter2_expected_classes
+            collapsed_true = (true_pseudo_labels // collapse_factor).astype(int)
+            collapsed_pred = (predicted_pseudo_labels // collapse_factor).astype(int)
+
+            iter2_level_stats = _compute_per_group_routing_stats(
+                collapsed_true,
+                collapsed_pred,
+                iter2_expected_classes,
+                min_samples_threshold,
+            )
+
+            results.update(
+                {
+                    "iter2_level_worst_group_accuracy": iter2_level_stats[
+                        "worst_group_accuracy"
+                    ],
+                    "iter2_level_worst_group_accuracy_filled": iter2_level_stats[
+                        "worst_group_accuracy_filled"
+                    ],
+                    "iter2_level_group_accuracies": iter2_level_stats[
+                        "group_accuracies"
+                    ],
+                    "iter2_level_node_sizes": iter2_level_stats["node_sizes"],
+                    "iter2_level_per_node_accuracy": iter2_level_stats[
+                        "per_node_accuracy"
+                    ],
+                    "iter2_level_num_filled_classes": iter2_level_stats[
+                        "num_filled_classes"
+                    ],
+                    "iter2_level_num_expected_classes": iter2_level_stats[
+                        "num_expected_classes"
+                    ],
+                }
+            )
+
+            # Iter-2-level DNA/DNF1
+            iter2_dna = compute_difficult_node_accuracy(collapsed_true, collapsed_pred)
+            iter2_dnf1 = compute_difficult_node_f1(collapsed_true, collapsed_pred)
+            results["iter2_level_difficult_node_accuracy"] = iter2_dna
+            results["iter2_level_difficult_node_f1"] = iter2_dnf1
+
+            # Iter-2-level AUROC (one-vs-rest per group), computed when routing
+            # probabilities are provided.
+            if routing_probs is not None:
+                from sklearn.metrics import roc_auc_score
+
+                # Collapse probs: sum softmax probs for nodes in the same iter-2 group
+                collapsed_probs = np.zeros(
+                    (len(collapsed_true), iter2_expected_classes), dtype=np.float64
+                )
+                for j in range(iter2_expected_classes):
+                    start = j * collapse_factor
+                    end = (j + 1) * collapse_factor
+                    collapsed_probs[:, j] = routing_probs[:, start:end].sum(axis=1)
+
+                iter2_auroc_per_group: Dict[int, float] = {}
+                for j in range(iter2_expected_classes):
+                    binary_labels = (collapsed_true == j).astype(int)
+                    if 0 < binary_labels.sum() < len(binary_labels):
+                        try:
+                            auroc = roc_auc_score(binary_labels, collapsed_probs[:, j])
+                            iter2_auroc_per_group[int(j)] = float(auroc)
+                        except ValueError:
+                            pass
+
+                results["iter2_level_per_group_auroc"] = iter2_auroc_per_group
+                results["iter2_level_worst_group_auroc"] = (
+                    float(min(iter2_auroc_per_group.values()))
+                    if iter2_auroc_per_group
+                    else float("nan")
+                )
+
+    return results
+
+
+def get_worst_pseudo_node_stats(
+    pseudo_metrics: Optional[Dict[str, Any]],
+    metric: str = "wga",
+) -> Tuple[Optional[float], Optional[int]]:
+    """Return (value, n_worst) for the worst iter-2-level pseudo group.
+
+    metric="wga" (default): worst-group accuracy; falls back to iter-k partition
+        if iter-2-level keys are absent.
+    metric="auroc": worst-group AUROC; requires `iter2_level_per_group_auroc`
+        (only present when routing_probs were passed to compute_pseudo_label_metrics).
+    Empty groups are excluded.
+    """
+    if pseudo_metrics is None:
+        return None, None
+
+    if metric == "auroc":
+        per_group = pseudo_metrics.get("iter2_level_per_group_auroc")
+        node_sizes = pseudo_metrics.get("iter2_level_node_sizes")
+        if not per_group or not node_sizes:
+            return None, None
+        valid = [(gid, val) for gid, val in per_group.items() if node_sizes.get(gid, 0) > 0]
+        if not valid:
+            return None, None
+        worst_gid, worst_val = min(valid, key=lambda x: x[1])
+        return float(worst_val), int(node_sizes[worst_gid])
+
+    per_node_acc = pseudo_metrics.get("iter2_level_per_node_accuracy")
+    node_sizes = pseudo_metrics.get("iter2_level_node_sizes")
+    if not per_node_acc or not node_sizes:
+        per_node_acc = pseudo_metrics.get("per_node_accuracy", {})
+        node_sizes = pseudo_metrics.get("node_sizes", {})
+    if not per_node_acc or not node_sizes:
+        return None, None
+
+    valid = [(gid, acc) for gid, acc in per_node_acc.items() if node_sizes.get(gid, 0) > 0]
+    if not valid:
+        return None, None
+
+    worst_gid, worst_acc = min(valid, key=lambda x: x[1])
+    return float(worst_acc), int(node_sizes[worst_gid])
 
 
 def print_evaluation_report(

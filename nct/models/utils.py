@@ -19,49 +19,28 @@ def initialize_or_update_model(
     num_channels: int = 3,
     **model_kwargs
 ) -> HierarchicalClassifier:
-    """
-    Initialize a new hierarchical model or transfer weights from a previous one.
-    Args:
-        num_nodes: Number of nodes/heads for the new model
-        prev_model: Previous model to transfer weights from (optional)
-        backbone: Backbone architecture name
-        pretrained: Whether to use pretrained backbone weights
-        device: Device to place the model on
-        verbose: Verbosity level
-        iteration: Current iteration number (1-indexed)
-        hierarchical: Routing mode ('none' or 'correct_label_routing')
-        **model_kwargs: Additional arguments for HierarchicalClassifier
-    Returns:
-        HierarchicalClassifier: New model with optionally transferred weights
+    """Build a HierarchicalClassifier with num_nodes heads, optionally transferring from prev_model.
+
+    In hierarchical mode, prev_model's output heads become the new model's parent
+    layer (children are initialised fresh). In flat mode, each old head is copied
+    into both of its child heads.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Determine if this mode uses tree structure
-    # Both correct_label_routing use tree structure
-    # Only "none" uses simple parallel heads
     use_tree_structure = (hierarchical != "none")
 
-    # Build parent layers for hierarchical modes (correct_label_routing)
     parent_layers = None
     if prev_model is not None and use_tree_structure and iteration > 1:
-        # Copy existing parent layers
         parent_layers = [layer for layer in prev_model.parent_layers]
 
-        # Convert old output heads to parent heads (keep all layers for auxiliary loss)
+        # Old output heads become the new parent layer. All layers are kept so
+        # the auxiliary loss can score the parent's classification.
         new_parent_layer = nn.ModuleList()
         for old_head in prev_model.output_heads:
-            # Keep all 4 layers: Linear, ReLU, Dropout, Linear (final for aux loss)
-            parent_head = nn.Sequential(
-                copy.deepcopy(old_head[0]),  # Linear(in_features, hidden_dim)
-                copy.deepcopy(old_head[1]),  # ReLU
-                copy.deepcopy(old_head[2]),  # Dropout
-                copy.deepcopy(old_head[3])   # Linear(hidden_dim, 1) - for aux loss
-            )
-            new_parent_layer.append(parent_head)
+            new_parent_layer.append(copy.deepcopy(old_head))
         parent_layers.append(new_parent_layer)
 
-    # Create new model
     new_model = HierarchicalClassifier(
         num_heads=num_nodes,
         backbone=backbone,
@@ -74,7 +53,6 @@ def initialize_or_update_model(
     ).to(device)
 
     if prev_model is not None:
-        # Transfer the learned backbone weights
         try:
             new_model.base.load_state_dict(prev_model.base.state_dict())
             if verbose >= 2:
@@ -83,8 +61,8 @@ def initialize_or_update_model(
             if verbose >= 1:
                 print(f"Backbone transfer failed: {e}")
 
-        # Non-hierarchical mode (none): Transfer head weights to both children
-        # Hierarchical modes (correct_label_routing): Parent layers already transferred above
+        # Flat mode: copy each parent head's weights into both its children.
+        # Tree mode has already moved the heads into parent_layers above.
         if not use_tree_structure:
             for old_head_idx, old_head in enumerate(prev_model.output_heads):
                 easy_idx = old_head_idx * 2
@@ -104,27 +82,14 @@ def initialize_or_update_model(
 
 
 def count_parameters(model: nn.Module, only_trainable: bool = True) -> int:
-    """
-    Count the number of parameters in a model.
-    Args:
-        model: PyTorch model
-        only_trainable: If True, count only trainable parameters
-    Returns:
-        int: Number of parameters
-    """
+    """Count parameters; if only_trainable, restricts to requires_grad=True."""
     if only_trainable:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
-    else:
-        return sum(p.numel() for p in model.parameters())
+    return sum(p.numel() for p in model.parameters())
 
 
 def print_model_info(model: nn.Module, model_name: str = "Model") -> None:
-    """
-    Print information about a model.
-    Args:
-        model: PyTorch model
-        model_name: Name to display for the model
-    """
+    """Print parameter counts and model-specific info for `model`."""
     total_params = count_parameters(model, only_trainable=False)
     trainable_params = count_parameters(model, only_trainable=True)
 

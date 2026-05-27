@@ -9,18 +9,36 @@ def create_transforms(config: DatasetConfig, is_training: bool = True):
     """Create image transforms based on dataset configuration."""
 
     if is_training:
-        transform_list = [
-            transforms.RandomResizedCrop(
-                config.train_crop_size,
-                scale=config.train_scale,
-                ratio=config.train_ratio,
-                interpolation=2,
-            ),
-            transforms.RandomHorizontalFlip(),
-        ]
+        if config.train_padding is not None:
+            transform_list = []
+            if config.train_resize is not None:
+                transform_list.append(transforms.Resize(config.train_resize))
+            transform_list.append(
+                transforms.RandomCrop(config.train_crop_size, padding=config.train_padding)
+            )
+        else:
+            transform_list = [
+                transforms.RandomResizedCrop(
+                    config.train_crop_size,
+                    scale=config.train_scale,
+                    ratio=config.train_ratio,
+                    interpolation=2,
+                ),
+            ]
 
+        if config.use_horizontal_flip:
+            transform_list.append(transforms.RandomHorizontalFlip())
         if config.use_vertical_flip:
             transform_list.append(transforms.RandomVerticalFlip())
+
+        if config.train_padding is not None:
+            target_h = (
+                config.target_resolution[0]
+                if isinstance(config.target_resolution, tuple)
+                else config.target_resolution
+            )
+            if config.train_crop_size != target_h:
+                transform_list.append(transforms.Resize(config.target_resolution))
 
         transform_list.extend(
             [

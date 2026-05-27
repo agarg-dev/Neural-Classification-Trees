@@ -1,60 +1,64 @@
-# NCT Configuration for CelebA Dataset (Blond Hair)
-# Consistent structure with Waterbird presets
+# NCT Configuration for Waterbird Dataset
+# Hyperparameters from Optuna best trial (trial 126, val WGA: 0.8519)
 
 # Training parameters
 num_iterations: 3
-epochs_per_iteration: [50, 50, 50]
-batch_size: 64
+epochs_per_iteration: [1, 100, 100]
+batch_size: 128
 seed: 42
 
 # Model architecture
 backbone: resnet50
 pretrained: true
-head_hidden_dim: 256
+head_type: mlp
+head_bn_affine: false
+head_hidden_dim: 32
 head_dropout: 0.3
+split_node_head_type: true
 
 # Learning rates
-initial_base_lr: 1.0e-05
-initial_head_lr: 0.0001
-lr_decay_factor: 1.5
+initial_base_lr: 2.7e-05 #2.6833858000408523e-05
+initial_head_lr: 1.3e-05 #1.3013873831153634e-05
+lr_decay_factor: 2.5
 
 # Optimizer configuration
 optimizer:
     type: adamw
-    weight_decay: 0.1
-    betas: [0.9, 0.999]
-    eps: 1.0e-08
+    weight_decay: 0.0024 #0.0024075185386240416
 
 # Scheduler configuration
 scheduler:
     type: plateau
-    patience: 5
-    factor: 0.5
+    factor: 0.1
+    patience: 10
     eta_min: 1.0e-06
 
 # Loss and regularization
+sampling_strategy: none
 use_class_weights: true
 skip_class_weights_iter1: true
-max_class_weight: 20.0 # Cap class weights to prevent extreme imbalance effects
+max_class_weight: 40.0
 regularization_type: l2
-lambda_l1: 0.0
-aux_loss_weight: 0.5
+aux_loss_weight: 1
+min_samples_per_node: 20
 
 # Training phases
-phase1_epochs_ratio: [1.0, 0.3, 0.3]
-phase1_patience: 8
-phase2_patience: 8
+phase1_epochs_ratio: [0.0, 0.3, 0.3]
+phase1_patience: 10
+phase2_patience: 15
 early_stopping: true
-model_selection_criterion: auto
+model_selection_criterion: iter2_wga
+depth_selection_enabled: true
+depth_selection_confidence: 1.96   # optional, this is the default
 
 # Routing strategy
 routing_strategy: correctness
 hierarchical_architecture: correct_label_routing
-node_balanced_sampling: false
 
 # Data parameters
 image_size: 224
 num_workers: 8
+num_channels: 3
 pin_memory: true
 
 # Logging
@@ -64,12 +68,11 @@ verbose: 2
 
 # Wandb configuration
 wandb_enabled: true
-wandb_project: nct-celeba
+wandb_project: nct-waterbirds
 wandb_entity: ankurgarg-university-of-calgary-in-alberta
-wandb_tags: [arc, celeba, blond-hair, resnet50]
+wandb_tags: [waterbirds, optuna-best]
 
 # Checkpoint settings
 save_iteration_checkpoints: true
 checkpoint_dir: ./checkpoints
 attribution_dir: ./attributions
-# {'initial_base_lr': 1e-06, 'initial_head_lr': 5e-05, 'lr_decay_factor': 1.25, 'weight_decay': 0.1, 'lambda_l1': 0.01, 'head_hidden_dim': 64, 'head_dropout': 0.0, 'phase1_ratio_iter2': 0.25}
