@@ -199,7 +199,7 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE).
 ## Citation
 
 ```bibtex
-@inproceedings{garg2026discovering,
+@misc{garg2026discovering,
   title     = {Discovering Latent Groups for Robust Classification},
   author    = {Garg, Ankur and A\"ivodji, Ulrich and Ebrahimi Kahou, Samira and Michalski, Vincent},
   year      = {2026}
