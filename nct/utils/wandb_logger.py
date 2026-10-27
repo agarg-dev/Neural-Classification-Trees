@@ -133,6 +133,7 @@ class WandbLogger:
         num_epochs_trained: int,
         early_stopped: bool,
         consolidated_group_metrics: Optional[Dict[str, Any]] = None,
+        multi_spurious_metrics: Optional[Dict[str, Any]] = None,
     ):
         """Log summary metrics after iteration completes."""
         if not self.enabled or not self.run:
@@ -222,6 +223,12 @@ class WandbLogger:
                         metrics[
                             f"iteration_{iteration}/test_group_{group_id}_auroc"
                         ] = auroc_val
+
+        if multi_spurious_metrics is not None:
+            metrics[f"iteration_{iteration}/id_accuracy"] = multi_spurious_metrics["id_accuracy"]
+            for name in [*multi_spurious_metrics["correlator_names"], "joint"]:
+                metrics[f"iteration_{iteration}/{name}_gap"] = multi_spurious_metrics["gaps"][name]
+                metrics[f"iteration_{iteration}/{name}_wga"] = multi_spurious_metrics["worst_group_accuracies"][name]
 
         if "node_distribution" in node_metrics:
             for node_name, node_data in node_metrics["node_distribution"].items():

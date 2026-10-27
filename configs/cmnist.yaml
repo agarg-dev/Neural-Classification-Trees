@@ -1,43 +1,46 @@
 # NCT configuration for CMNIST (5-class colored MNIST, LeNet-5 backbone)
 
 num_iterations: 3
-epochs_per_iteration: [50, 50, 50]
-batch_size: 128
+epochs_per_iteration: [2, 50, 50]
+batch_size: 64
 num_classes: 5
 seed: 42
 
 backbone: lenet5
 pretrained: false
-head_hidden_dim: 32
+head_batch_norm: true
+head_hidden_dim: 64
 head_dropout: 0.3
-head_type: mlp
-head_bn_affine: true
-iter1_head_type: linear
+head_type: linear
+head_bn_affine: false
+iter1_head_type: null
 split_node_head_type: true
 
-initial_base_lr: 5.0e-04
-initial_head_lr: 1.0e-04
+initial_base_lr: 0.09536031943352771
+initial_head_lr: 0.0009103510602826959
 lr_decay_factor: 2.0
 
 optimizer:
-  type: adam
-  weight_decay: 5.0e-03
+  nesterov: false
+  type: sgd
+  weight_decay: 0.0010751026882813751
 
 scheduler:
-  type: plateau
-  patience: 5
   factor: 0.5
+  patience: 5
+  type: plateau
 
-loss_type: ce
+loss_type: bce
 use_class_weights: true
 skip_class_weights_iter1: true
 max_class_weight: 20.0
 regularization_type: l2
-aux_loss_weight: 0.3
-min_samples_per_node: 5
+aux_loss_weight: 0.75
+min_samples_per_node: 0
 
-phase1_epochs_ratio: [0, 0.3, 0.3]
-early_stopping: true
+phase1_epochs_ratio: [0.0, 0.0, 0.1]
+phase2_patience: 5
+early_stopping: false
 model_selection_criterion: iter2_wga
 depth_selection_enabled: true
 depth_selection_confidence: 1.96

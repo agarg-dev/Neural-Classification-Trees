@@ -1,9 +1,10 @@
 """Dataset preparation and metadata loading."""
 
 import os
-from typing import Dict
+from typing import Dict, Tuple
 
 import pandas as pd
+from PIL import Image
 
 from .configs import DATASET_REGISTRY, DatasetConfig
 from .datasets import GenericImageDataset
@@ -170,12 +171,125 @@ def load_cmnist_metadata(data_dir: str, config: DatasetConfig) -> Dict:
     }
 
 
+def _load_urbancars_split(
+    dataset_path: str,
+    split: str,
+    correlation_folder: str,
+    target_resolution: Tuple[int, int],
+) -> pd.DataFrame:
+    """Build deterministic metadata for one official UrbanCars split."""
+    category_names = ("urban", "country")
+    split_root = os.path.join(dataset_path, correlation_folder, split)
+    if not os.path.isdir(split_root):
+        raise FileNotFoundError(
+            f"UrbanCars {split} split not found at {split_root}"
+        )
+
+    rows = []
+    for object_id, object_name in enumerate(category_names):
+        for background_id, background_name in enumerate(category_names):
+            for coobject_id, coobject_name in enumerate(category_names):
+                group_dir_name = (
+                    f"obj-{object_name}_bg-{background_name}_"
+                    f"co_occur_obj-{coobject_name}"
+                )
+                group_dir = os.path.join(split_root, group_dir_name)
+                if not os.path.isdir(group_dir):
+                    raise FileNotFoundError(
+                        f"UrbanCars group directory not found: {group_dir}"
+                    )
+
+                image_paths = sorted(
+                    os.path.join(group_dir, filename)
+                    for filename in os.listdir(group_dir)
+                    if filename.lower().endswith(".jpg")
+                )
+                if not image_paths:
+                    raise ValueError(
+                        f"UrbanCars group directory contains no JPG images: {group_dir}"
+                    )
+
+                group_id = object_id * 4 + background_id * 2 + coobject_id
+                for image_path in image_paths:
+                    with Image.open(image_path) as image:
+                        if image.size != tuple(target_resolution):
+                            raise ValueError(
+                                "UrbanCars images must preserve the official "
+                                f"{tuple(target_resolution)} resolution; found "
+                                f"{image.size} at {image_path}"
+                            )
+
+                    rows.append(
+                        {
+                            "img_filename": os.path.relpath(
+                                image_path, dataset_path
+                            ),
+                            "y": object_id,
+                            "background": background_id,
+                            "co_occur_obj": coobject_id,
+                            "bg_aligned": int(background_id == object_id),
+                            "co_occur_obj_aligned": int(
+                                coobject_id == object_id
+                            ),
+                            "group": group_id,
+                            "split": split,
+                        }
+                    )
+
+    metadata_df = pd.DataFrame(rows)
+    decoded_y = metadata_df["group"].to_numpy() // 4
+    if not (decoded_y == metadata_df["y"].to_numpy()).all():
+        raise RuntimeError("UrbanCars group encoding is inconsistent with targets")
+    if set(metadata_df["group"].unique()) != set(range(8)):
+        raise RuntimeError(
+            f"UrbanCars {split} split must contain all 8 joint groups"
+        )
+
+    return metadata_df
+
+
+def load_urbancars_metadata(data_dir: str, config: DatasetConfig) -> Dict:
+    """Load UrbanCars using the official Whac-A-Mole directory layout."""
+    dataset_path = os.path.join(data_dir, config.data_subdir)
+    if not os.path.isdir(dataset_path):
+        raise FileNotFoundError(f"UrbanCars dataset not found at {dataset_path}")
+
+    train_df = _load_urbancars_split(
+        dataset_path,
+        split="train",
+        correlation_folder="bg-0.95_co_occur_obj-0.95",
+        target_resolution=config.target_resolution,
+    )
+    val_df = _load_urbancars_split(
+        dataset_path,
+        split="val",
+        correlation_folder="bg-0.5_co_occur_obj-0.5",
+        target_resolution=config.target_resolution,
+    )
+    test_df = _load_urbancars_split(
+        dataset_path,
+        split="test",
+        correlation_folder="bg-0.5_co_occur_obj-0.5",
+        target_resolution=config.target_resolution,
+    )
+
+    return {
+        "train_df": train_df,
+        "val_df": val_df,
+        "test_df": test_df,
+        "group_test": test_df["group"].to_numpy(),
+        "group_val": val_df["group"].to_numpy(),
+        "root_dir": dataset_path,
+    }
+
+
 METADATA_LOADERS = {
     "waterbird": load_waterbird_metadata,
     "celeba": load_celeba_metadata,
     "isic": load_isic_metadata,
     "umnist": load_umnist_metadata,
     "cmnist": load_cmnist_metadata,
+    "urbancars": load_urbancars_metadata,
 }
 
 

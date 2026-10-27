@@ -7,31 +7,37 @@ seed: 42
 
 backbone: resnet50
 pretrained: true
+head_batch_norm: false
+head_bn_affine: false
+split_node_head_type: true
 head_hidden_dim: 96
-head_dropout: 0.0
+head_dropout: 0.2
 
-initial_base_lr: 8.0e-05
-initial_head_lr: 1.0e-04
-lr_decay_factor: 2.5
+initial_base_lr: 0.008884875869294623
+initial_head_lr: 0.008814188849906928
+lr_decay_factor: 3.0
 
 optimizer:
-    type: adamw
-    weight_decay: 0.1
-    betas: [0.9, 0.999]
+  betas:
+  - 0.9
+  - 0.999
+  nesterov: false
+  type: sgd
+  weight_decay: 6.3264826260005775e-06
 
 scheduler:
-    type: step
-    step_size: 15
-    gamma: 0.1
+  gamma: 0.1
+  step_size: 15
+  type: step
 
 use_class_weights: true
 max_class_weight: 20.0
-min_samples_per_node: 10
+min_samples_per_node: 0
 regularization_type: elastic_net
-lambda_l1: 1.0e-03
-aux_loss_weight: 1.0
+lambda_l1: 0.001
+aux_loss_weight: 2.0
 
-phase1_epochs_ratio: [1.0, 0.5, 0.5]
+phase1_epochs_ratio: [1, 0.6000000000000001, 0.1]
 phase1_patience: 15
 phase2_patience: 15
 early_stopping: true
@@ -43,7 +49,7 @@ routing_strategy: correctness
 hierarchical_architecture: correct_label_routing
 
 image_size: 224
-num_workers: 8
+num_workers: 16
 pin_memory: true
 cache_images_in_memory: false
 

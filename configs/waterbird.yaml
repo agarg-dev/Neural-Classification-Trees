@@ -7,8 +7,9 @@ seed: 42
 
 backbone: resnet50
 pretrained: true
+head_batch_norm: true
 head_type: mlp
-head_bn_affine: true
+head_bn_affine: false
 head_hidden_dim: 32
 head_dropout: 0.3
 split_node_head_type: true
@@ -18,21 +19,21 @@ initial_head_lr: 1.3e-05
 lr_decay_factor: 2.5
 
 optimizer:
-    type: adamw
-    weight_decay: 0.0024
+  type: adamw
+  weight_decay: 0.0024
 
 scheduler:
-    type: plateau
-    factor: 0.1
-    patience: 10
-    eta_min: 1.0e-06
+  type: plateau
+  factor: 0.1
+  patience: 10
+  eta_min: 1.0e-06
 
 sampling_strategy: none
 use_class_weights: true
 skip_class_weights_iter1: true
 max_class_weight: 40.0
 regularization_type: l2
-aux_loss_weight: 1.0
+aux_loss_weight: 1
 min_samples_per_node: 20
 
 phase1_epochs_ratio: [0.0, 0.3, 0.3]

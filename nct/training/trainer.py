@@ -421,7 +421,10 @@ class NCTTrainer:
                 )
 
         for epoch in range(epochs):
-            train_loss = self._train_epoch(train_loader, optimizer, class_weights)
+            train_loss = self._train_epoch(
+                train_loader, optimizer, class_weights,
+                freeze_features=(phase_name == "Phase 1"),
+            )
             train_losses.append(train_loss)
 
             val_result = self._validate_epoch(
@@ -640,9 +643,13 @@ class NCTTrainer:
         loader: DataLoader,
         optimizer: torch.optim.Optimizer,
         class_weights: Optional[torch.Tensor],
+        freeze_features: bool = False,
     ) -> float:
         """Execute a single training epoch."""
         self.model.train()
+        if freeze_features:
+            self.model.base.eval()
+            self.model.parent_layers.eval()
         total_loss = 0.0
         total_aux_loss = 0.0
         num_batches = 0

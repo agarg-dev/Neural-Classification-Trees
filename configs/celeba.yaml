@@ -7,27 +7,28 @@ seed: 42
 
 backbone: resnet50
 pretrained: true
-head_hidden_dim: 128
-head_dropout: 0.3
+head_batch_norm: true
+head_hidden_dim: 256
+head_dropout: 0.1
 head_type: mlp
 head_bn_affine: false
 split_node_head_type: true
 
-initial_base_lr: 1.0e-05
-initial_head_lr: 1.0e-04
-lr_decay_factor: 1.5
+initial_base_lr: 0.0028304613600382937
+initial_head_lr: 1.3582207099691412e-05
+lr_decay_factor: 4.0
 
 optimizer:
-    type: sgd
-    weight_decay: 0.1
-    momentum: 0.9
-    nesterov: false
+  momentum: 0.9
+  nesterov: false
+  type: sgd
+  weight_decay: 0.00019226274670973095
 
 scheduler:
-    type: plateau
-    patience: 10
-    factor: 0.5
-    eta_min: 1.0e-06
+  eta_min: 1.0e-06
+  factor: 0.5
+  patience: 10
+  type: plateau
 
 sampling_strategy: downsample
 use_class_weights: true
@@ -36,9 +37,9 @@ max_class_weight: 20.0
 min_samples_per_node: 10
 regularization_type: l2
 lambda_l1: 0.0
-aux_loss_weight: 2
+aux_loss_weight: 0.25
 
-phase1_epochs_ratio: [1, 0.3, 0.3]
+phase1_epochs_ratio: [1, 0.6000000000000001, 0.5]
 phase1_patience: 15
 phase2_patience: 15
 early_stopping: true

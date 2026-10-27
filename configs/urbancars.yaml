@@ -1,0 +1,65 @@
+# NCT configuration for UrbanCars
+
+num_iterations: 3
+epochs_per_iteration: [1, 100, 100]
+batch_size: 128
+seed: 42
+
+backbone: resnet50
+pretrained: true
+head_batch_norm: true
+head_type: mlp
+head_bn_affine: false
+head_hidden_dim: 32
+head_dropout: 0.30000000000000004
+split_node_head_type: true
+
+initial_base_lr: 9.86918922559828e-06
+initial_head_lr: 1.0e-05
+lr_decay_factor: 1.5
+
+optimizer:
+  type: adamw
+  weight_decay: 0.34115719415558077
+
+scheduler:
+  type: plateau
+  factor: 0.1
+  patience: 10
+  eta_min: 1.0e-06
+
+sampling_strategy: none
+use_class_weights: true
+skip_class_weights_iter1: true
+max_class_weight: 40.0
+regularization_type: l2
+aux_loss_weight: 1.0
+min_samples_per_node: 10
+
+phase1_epochs_ratio: [0.0, 0.4, 0.45]
+phase1_patience: 10
+phase2_patience: 15
+early_stopping: true
+model_selection_criterion: iter2_wga
+depth_selection_enabled: true
+depth_selection_confidence: 1.96
+
+routing_strategy: correctness
+hierarchical_architecture: correct_label_routing
+
+image_size: 256
+num_workers: 8
+num_channels: 3
+pin_memory: true
+
+log_attributions: true
+log_epoch_metrics: true
+verbose: 2
+
+wandb_enabled: false
+wandb_project: nct-urbancars
+wandb_tags: [urbancars]
+
+save_iteration_checkpoints: true
+checkpoint_dir: ./checkpoints
+attribution_dir: ./attributions

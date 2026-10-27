@@ -1,5 +1,6 @@
 """Evaluation metrics for hierarchical classification."""
 
+from itertools import product
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -13,6 +14,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from ..data.configs import DATASET_REGISTRY, MultiSpuriousCorrelationConfig
 from ..utils.hierarchical import get_num_nodes
 
 
@@ -234,6 +236,259 @@ def compute_consolidated_group_metrics(
         "per_class": per_class_metrics,
         "consolidated_groups": consolidated_groups.tolist(),
     }
+
+
+def calculate_multi_spurious_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    group_labels: np.ndarray,
+    config: MultiSpuriousCorrelationConfig,
+    num_classes: int = 2,
+) -> Dict[str, Any]:
+    """Evaluate multiple binary correlators from a joint group encoding.
+
+    The expected encoding is class-major with correlators in the order given
+    by ``config.correlator_names``. For two correlators this is
+    ``y * 4 + correlator_0 * 2 + correlator_1``.
+
+    Alignment-cell accuracies match the UrbanCars reference implementation:
+    accuracy is computed in every target-class cell and then macro-averaged
+    across target classes. Marginal worst-group accuracies are sample-weighted
+    after marginalizing the other correlators.
+    """
+    if num_classes != 2:
+        raise ValueError(
+            "Multi-spurious alignment metrics currently require binary targets"
+        )
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    group_labels = np.asarray(group_labels)
+
+    for name, values in (
+        ("y_true", y_true),
+        ("y_pred", y_pred),
+        ("group_labels", group_labels),
+    ):
+        if values.ndim != 1:
+            raise ValueError(f"{name} must be a one-dimensional array")
+    if not (len(y_true) == len(y_pred) == len(group_labels)):
+        raise ValueError(
+            "y_true, y_pred, and group_labels must have the same length"
+        )
+    if len(y_true) == 0:
+        raise ValueError("Multi-spurious metrics require at least one sample")
+    if not np.all(np.isin(y_true, np.arange(num_classes))):
+        raise ValueError("y_true contains labels outside the configured classes")
+    if not np.all(np.equal(group_labels, np.floor(group_labels))):
+        raise ValueError("group_labels must contain integer-valued group IDs")
+
+    group_labels = group_labels.astype(np.int64, copy=False)
+    num_correlators = len(config.correlator_names)
+    combinations_per_class = 2**num_correlators
+    expected_num_groups = num_classes * combinations_per_class
+
+    if np.any(group_labels < 0) or np.any(group_labels >= expected_num_groups):
+        raise ValueError(
+            "Multi-spurious group IDs must be in "
+            f"[0, {expected_num_groups - 1}]"
+        )
+
+    decoded_targets = group_labels // combinations_per_class
+    if not np.array_equal(decoded_targets, y_true.astype(np.int64, copy=False)):
+        raise ValueError(
+            "Joint group IDs are inconsistent with y_true under the configured "
+            "class-major encoding"
+        )
+
+    shortcut_code = group_labels % combinations_per_class
+    correlator_values = np.empty(
+        (len(group_labels), num_correlators), dtype=np.int64
+    )
+    for index in range(num_correlators):
+        divisor = 2 ** (num_correlators - index - 1)
+        correlator_values[:, index] = (shortcut_code // divisor) % 2
+
+    correct = y_pred == y_true
+    aligned = correlator_values == y_true[:, None]
+
+    alignment_accuracies: Dict[str, Dict[str, Any]] = {}
+    alignment_accuracy_by_pattern: Dict[Tuple[bool, ...], float] = {}
+    alignment_support_by_pattern: Dict[Tuple[bool, ...], int] = {}
+
+    for alignment_pattern in product((False, True), repeat=num_correlators):
+        cell_name = "__".join(
+            f"{name}_{'present' if is_aligned else 'absent'}"
+            for name, is_aligned in zip(
+                config.correlator_names, alignment_pattern
+            )
+        )
+        cell_mask = np.all(
+            aligned == np.asarray(alignment_pattern, dtype=bool), axis=1
+        )
+        per_class_accuracy: Dict[int, float] = {}
+        for class_id in range(num_classes):
+            class_mask = cell_mask & (y_true == class_id)
+            per_class_accuracy[class_id] = (
+                float(np.mean(correct[class_mask]))
+                if np.any(class_mask)
+                else float("nan")
+            )
+
+        class_accuracies = np.asarray(
+            list(per_class_accuracy.values()), dtype=np.float64
+        )
+        cell_accuracy = (
+            float(np.mean(class_accuracies))
+            if np.all(np.isfinite(class_accuracies))
+            else float("nan")
+        )
+        cell_support = int(np.sum(cell_mask))
+        alignment_accuracy_by_pattern[alignment_pattern] = cell_accuracy
+        alignment_support_by_pattern[alignment_pattern] = cell_support
+        alignment_accuracies[cell_name] = {
+            "accuracy": cell_accuracy,
+            "support": cell_support,
+            "per_class_accuracy": per_class_accuracy,
+        }
+
+    id_accuracy = 0.0
+    id_accuracy_is_defined = True
+    for alignment_pattern, cell_accuracy in alignment_accuracy_by_pattern.items():
+        if not np.isfinite(cell_accuracy):
+            id_accuracy_is_defined = False
+            break
+        cell_weight = 1.0
+        for is_aligned, probability in zip(
+            alignment_pattern, config.train_alignment_probabilities
+        ):
+            cell_weight *= probability if is_aligned else 1.0 - probability
+        id_accuracy += cell_weight * cell_accuracy
+    if not id_accuracy_is_defined:
+        id_accuracy = float("nan")
+
+    all_present = tuple(True for _ in range(num_correlators))
+    all_absent = tuple(False for _ in range(num_correlators))
+    gaps: Dict[str, float] = {}
+    for correlator_index, correlator_name in enumerate(config.correlator_names):
+        single_absent = list(all_present)
+        single_absent[correlator_index] = False
+        cell_accuracy = alignment_accuracy_by_pattern[tuple(single_absent)]
+        gaps[correlator_name] = (
+            float(cell_accuracy - id_accuracy)
+            if np.isfinite(cell_accuracy) and np.isfinite(id_accuracy)
+            else float("nan")
+        )
+    all_absent_accuracy = alignment_accuracy_by_pattern[all_absent]
+    gaps["joint"] = (
+        float(all_absent_accuracy - id_accuracy)
+        if np.isfinite(all_absent_accuracy) and np.isfinite(id_accuracy)
+        else float("nan")
+    )
+
+    marginal_group_accuracies: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    worst_group_accuracies: Dict[str, float] = {}
+    for correlator_index, correlator_name in enumerate(config.correlator_names):
+        correlator_groups: Dict[str, Dict[str, Any]] = {}
+        cell_accuracies = []
+        complete_grid = True
+        for class_id in range(num_classes):
+            for correlator_value in range(2):
+                mask = (
+                    (y_true == class_id)
+                    & (correlator_values[:, correlator_index] == correlator_value)
+                )
+                accuracy = (
+                    float(np.mean(correct[mask]))
+                    if np.any(mask)
+                    else float("nan")
+                )
+                support = int(np.sum(mask))
+                correlator_groups[
+                    f"class_{class_id}__value_{correlator_value}"
+                ] = {
+                    "accuracy": accuracy,
+                    "support": support,
+                }
+                if np.isfinite(accuracy):
+                    cell_accuracies.append(accuracy)
+                else:
+                    complete_grid = False
+
+        marginal_group_accuracies[correlator_name] = correlator_groups
+        worst_group_accuracies[correlator_name] = (
+            float(min(cell_accuracies))
+            if complete_grid and cell_accuracies
+            else float("nan")
+        )
+
+    joint_group_accuracies: Dict[int, Dict[str, Any]] = {}
+    joint_accuracies = []
+    complete_joint_grid = True
+    for group_id in range(expected_num_groups):
+        mask = group_labels == group_id
+        accuracy = (
+            float(np.mean(correct[mask])) if np.any(mask) else float("nan")
+        )
+        support = int(np.sum(mask))
+        joint_group_accuracies[group_id] = {
+            "accuracy": accuracy,
+            "support": support,
+        }
+        if np.isfinite(accuracy):
+            joint_accuracies.append(accuracy)
+        else:
+            complete_joint_grid = False
+
+    worst_group_accuracies["joint"] = (
+        float(min(joint_accuracies))
+        if complete_joint_grid and joint_accuracies
+        else float("nan")
+    )
+
+    return {
+        "correlator_names": list(config.correlator_names),
+        "train_alignment_probabilities": {
+            name: float(probability)
+            for name, probability in zip(
+                config.correlator_names,
+                config.train_alignment_probabilities,
+            )
+        },
+        "id_accuracy": float(id_accuracy),
+        "gaps": gaps,
+        "worst_group_accuracies": worst_group_accuracies,
+        "alignment_accuracies": alignment_accuracies,
+        "marginal_group_accuracies": marginal_group_accuracies,
+        "joint_group_accuracies": joint_group_accuracies,
+        "complete_alignment_grid": all(
+            support > 0 for support in alignment_support_by_pattern.values()
+        ),
+        "complete_joint_grid": complete_joint_grid,
+    }
+
+
+def calculate_dataset_multi_spurious_metrics(
+    dataset_name: str,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    group_labels: np.ndarray,
+    num_classes: int = 2,
+) -> Optional[Dict[str, Any]]:
+    """Run multi-spurious metrics only for datasets declaring such a schema."""
+    dataset_config = DATASET_REGISTRY.get(dataset_name.lower())
+    if (
+        dataset_config is None
+        or not dataset_config.has_multiple_spurious_correlators
+    ):
+        return None
+    return calculate_multi_spurious_metrics(
+        y_true,
+        y_pred,
+        group_labels,
+        dataset_config.multi_spurious,
+        num_classes=num_classes,
+    )
 
 
 def calculate_hierarchical_metrics(
@@ -611,6 +866,15 @@ def print_evaluation_report(
         summary = metrics["group_metrics"]["summary"]
         print(f"  Worst-group accuracy: {summary['worst_group_accuracy']:.3f}")
         print(f"  Mean group accuracy:  {summary['mean_group_accuracy']:.3f}")
+
+    if "multi_spurious_metrics" in metrics:
+        multi = metrics["multi_spurious_metrics"]
+        print(f"  ID accuracy:          {multi['id_accuracy']:.3f}")
+        for name in [*multi["correlator_names"], "joint"]:
+            print(
+                f"  {name} gap / WGA: {multi['gaps'][name]:+.3f} / "
+                f"{multi['worst_group_accuracies'][name]:.3f}"
+            )
 
     if "node_utilization" in metrics:
         print(

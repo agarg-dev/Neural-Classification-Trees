@@ -21,7 +21,7 @@ def parse_args():
         "--dataset",
         type=str,
         default="waterbird",
-        choices=["waterbird", "celeba", "isic", "umnist", "cmnist"],
+        choices=["waterbird", "celeba", "isic", "umnist", "cmnist", "urbancars"],
     )
     parser.add_argument("--data_dir", type=str, default="./data")
     parser.add_argument("--attribution_dir", type=str, default="./attributions")

@@ -94,6 +94,7 @@ class NCTConfig:
     head_type: str = "mlp"
     iter1_head_type: Optional[str] = None
     split_node_head_type: Union[bool, str] = False
+    head_batch_norm: bool = True
     head_bn_affine: bool = False
     num_channels: int = 3
     num_classes: int = 2

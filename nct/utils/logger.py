@@ -313,6 +313,7 @@ class NCTLogger:
         num_epochs_trained: int = 0,
         early_stopped: bool = False,
         consolidated_group_metrics: Optional[Dict[str, Any]] = None,
+        multi_spurious_metrics: Optional[Dict[str, Any]] = None,
     ):
         """Log summary metrics after iteration completes."""
         if self.wandb_logger:
@@ -325,6 +326,7 @@ class NCTLogger:
                 num_epochs_trained,
                 early_stopped,
                 consolidated_group_metrics,
+                multi_spurious_metrics=multi_spurious_metrics,
             )
 
     def log_transition_statistics(
@@ -382,6 +384,7 @@ class NCTLogger:
         group_results: Optional[Dict[str, Any]] = None,
         consolidated_group_results: Optional[Dict[str, Any]] = None,
         class_names: Optional[tuple] = None,
+        multi_spurious_results: Optional[Dict[str, Any]] = None,
     ):
         """Print evaluation results to console."""
         if self.verbose == 0:
@@ -409,6 +412,15 @@ class NCTLogger:
                 f"Worst-Group Accuracy ({num_consolidated} consolidated): {consolidated_group_results['worst_group_accuracy']:.2%}",
                 level=1,
             )
+
+        if multi_spurious_results is not None:
+            self.log(f"ID Accuracy: {multi_spurious_results['id_accuracy']:.2%}", level=1)
+            for name in [*multi_spurious_results["correlator_names"], "joint"]:
+                self.log(
+                    f"{name} Gap: {multi_spurious_results['gaps'][name]:+.2%}  |  "
+                    f"{name} WGA: {multi_spurious_results['worst_group_accuracies'][name]:.2%}",
+                    level=1,
+                )
 
         self.log(f"Test Precision: {test_metrics['precision']:.4f}", level=2)
         self.log(f"Test Recall: {test_metrics['recall']:.4f}", level=2)

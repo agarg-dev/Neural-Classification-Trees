@@ -16,6 +16,36 @@ CMNIST_MEAN = (0.5, 0.5, 0.5)
 CMNIST_STD = (0.5, 0.5, 0.5)
 
 
+@dataclass(frozen=True)
+class MultiSpuriousCorrelationConfig:
+    """Evaluation schema for datasets with multiple binary correlators.
+
+    Group IDs must use class-major, mixed-radix encoding. For two binary
+    correlators ``a`` and ``b`` this is ``y * 4 + a * 2 + b``. Each
+    correlator is considered aligned when its value equals the target class.
+    """
+
+    correlator_names: Tuple[str, ...]
+    train_alignment_probabilities: Tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.correlator_names) < 2:
+            raise ValueError(
+                "Multi-spurious evaluation requires at least two correlators"
+            )
+        if len(set(self.correlator_names)) != len(self.correlator_names):
+            raise ValueError("Multi-spurious correlator names must be unique")
+        if len(self.train_alignment_probabilities) != len(self.correlator_names):
+            raise ValueError(
+                "train_alignment_probabilities must match correlator_names"
+            )
+        if any(
+            probability < 0.0 or probability > 1.0
+            for probability in self.train_alignment_probabilities
+        ):
+            raise ValueError("Alignment probabilities must lie in [0, 1]")
+
+
 @dataclass
 class DatasetConfig:
     """Configuration for a dataset."""
@@ -37,13 +67,20 @@ class DatasetConfig:
     eval_resize: Optional[int] = None
     eval_centercrop_first: Optional[int] = None
     eval_centercrop: int = 224
+    preserve_native_resolution: bool = False
 
     group_names: Optional[Dict[int, str]] = None
+    multi_spurious: Optional[MultiSpuriousCorrelationConfig] = None
 
     normalize_mean: Tuple[float, ...] = IMAGENET_MEAN
     normalize_std: Tuple[float, ...] = IMAGENET_STD
 
     num_channels: int = 3
+
+
+    @property
+    def has_multiple_spurious_correlators(self) -> bool:
+        return self.multi_spurious is not None and len(self.multi_spurious.correlator_names) > 1
 
 
 WATERBIRD_CONFIG = DatasetConfig(
@@ -143,10 +180,35 @@ CMNIST_CONFIG = DatasetConfig(
 )
 
 
+URBANCARS_CONFIG = DatasetConfig(
+    name="urbancars",
+    data_subdir="urbancars",
+    class_names=("Urban Car", "Country Car"),
+    target_resolution=(256, 256),
+    train_crop_size=256,
+    preserve_native_resolution=True,
+    group_names={
+        0: "Urban Car | Urban BG | Urban CoObj (Both Aligned)",
+        1: "Urban Car | Urban BG | Country CoObj (CoObj Conflict)",
+        2: "Urban Car | Country BG | Urban CoObj (BG Conflict)",
+        3: "Urban Car | Country BG | Country CoObj (Both Conflict)",
+        4: "Country Car | Urban BG | Urban CoObj (Both Conflict)",
+        5: "Country Car | Urban BG | Country CoObj (BG Conflict)",
+        6: "Country Car | Country BG | Urban CoObj (CoObj Conflict)",
+        7: "Country Car | Country BG | Country CoObj (Both Aligned)",
+    },
+    multi_spurious=MultiSpuriousCorrelationConfig(
+        correlator_names=("bg", "co_occur_obj"),
+        train_alignment_probabilities=(0.95, 0.95),
+    ),
+)
+
+
 DATASET_REGISTRY = {
     "waterbird": WATERBIRD_CONFIG,
     "celeba": CELEBA_CONFIG,
     "isic": ISIC_CONFIG,
     "umnist": UMNIST_CONFIG,
     "cmnist": CMNIST_CONFIG,
+    "urbancars": URBANCARS_CONFIG,
 }

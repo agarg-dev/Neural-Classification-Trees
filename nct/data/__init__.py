@@ -6,6 +6,7 @@ from .configs import (
     DATASET_REGISTRY,
     ISIC_CONFIG,
     UMNIST_CONFIG,
+    URBANCARS_CONFIG,
     WATERBIRD_CONFIG,
 )
 from .datasets import GenericImageDataset, IterativeDataset, extract_labels_from_dataset
@@ -35,5 +36,6 @@ __all__ = [
     "ISIC_CONFIG",
     "UMNIST_CONFIG",
     "CMNIST_CONFIG",
+    "URBANCARS_CONFIG",
     "create_transforms",
 ]

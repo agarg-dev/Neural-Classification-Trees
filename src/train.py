@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset",
         type=str,
         required=True,
-        choices=["waterbird", "celeba", "isic", "umnist", "cmnist"],
+        choices=["waterbird", "celeba", "isic", "umnist", "cmnist", "urbancars"],
     )
     parser.add_argument("--preset", type=str, required=True)
     parser.add_argument("--data_dir", type=str, default="./data")
@@ -135,6 +135,9 @@ def main():
     if "group_metrics" in results:
         group_metrics = results["group_metrics"]
         print(f"  Worst Group Accuracy: {group_metrics['summary']['worst_group_accuracy']:.2%}")
+
+    if "multi_spurious_metrics" in results:
+        print(f"  ID Accuracy: {results['multi_spurious_metrics']['id_accuracy']:.2%}")
 
     print(f"\n  Wall-Clock Time:")
     print(f"    total_train_s: {train_elapsed:.1f}s ({train_elapsed/60:.1f}m)")

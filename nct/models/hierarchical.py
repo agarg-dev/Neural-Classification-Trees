@@ -114,6 +114,7 @@ class HierarchicalClassifier(nn.Module):
         head_type: str = "mlp",
         iter1_head_type: Optional[str] = None,
         split_node_head_type: bool = False,
+        head_batch_norm: bool = True,
         head_bn_affine: bool = False,
         num_classes_per_head: int = 1,
         iteration: int = 1,
@@ -134,6 +135,7 @@ class HierarchicalClassifier(nn.Module):
         self.num_channels = num_channels
         self.image_size = image_size
         self.split_node_head_type = split_node_head_type
+        self.head_batch_norm = head_batch_norm
         self.head_bn_affine = head_bn_affine
         self.effective_head_type = (iter1_head_type if iteration == 1 and iter1_head_type is not None else head_type)
 
@@ -224,23 +226,26 @@ class HierarchicalClassifier(nn.Module):
         else:
             head_type = self.effective_head_type
 
-        norm1 = nn.Identity() if self.iteration == 1 else nn.BatchNorm1d(in_features, affine=self.head_bn_affine)
-        norm2 = nn.Identity() if self.iteration == 1 else nn.BatchNorm1d(hidden_dim, affine=self.head_bn_affine)
+        norm1 = []
+        norm2 = []
+        if self.head_batch_norm:
+            norm1 = [nn.Identity() if self.iteration == 1 else nn.BatchNorm1d(in_features, affine=self.head_bn_affine)]
+            norm2 = [nn.Identity() if self.iteration == 1 else nn.BatchNorm1d(hidden_dim, affine=self.head_bn_affine)]
         if head_type == "mlp":
             feature_extractor = nn.Sequential(
-                norm1,
+                *norm1,
                 nn.Linear(in_features, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
             )
         else:
             feature_extractor = nn.Sequential(
-                norm1,
+                *norm1,
                 nn.Linear(in_features, hidden_dim),
             )
 
         classifier = nn.Sequential(
-                norm2,
+                *norm2,
                 nn.Linear(hidden_dim, num_classes)
         )
 

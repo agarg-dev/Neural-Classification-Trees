@@ -32,6 +32,7 @@ class CheckpointManager:
             "head_hidden_dim": config.head_hidden_dim,
             "head_dropout": config.head_dropout,
             "head_type": config.head_type,
+            "head_batch_norm": config.head_batch_norm,
             "head_bn_affine": config.head_bn_affine,
             "iter1_head_type": config.iter1_head_type,
             "split_node_head_type": config.split_node_head_type,
@@ -58,13 +59,14 @@ class CheckpointManager:
             "config": config.to_dict(),
             "num_heads": len(model.output_heads),
             "iteration_results": iteration_results,
-            "iteration": config.num_iterations,
+            "iteration": model.iteration,
             "hierarchical": config.hierarchical_architecture,
             "backbone": config.backbone,
             "num_features": model.num_features,
             "head_hidden_dim": config.head_hidden_dim,
             "head_dropout": config.head_dropout,
             "head_type": config.head_type,
+            "head_batch_norm": config.head_batch_norm,
             "head_bn_affine": config.head_bn_affine,
             "iter1_head_type": config.iter1_head_type,
             "split_node_head_type": config.split_node_head_type,
@@ -138,6 +140,7 @@ class CheckpointManager:
         head_hidden_dim = checkpoint.get("head_hidden_dim", config.head_hidden_dim)
         head_dropout = checkpoint.get("head_dropout", config.head_dropout)
         head_type = checkpoint.get("head_type", getattr(config, "head_type", "mlp"))
+        head_batch_norm = CheckpointManager._head_batch_norm_from_checkpoint(checkpoint, config)
         head_bn_affine = checkpoint.get("head_bn_affine", getattr(config, "head_bn_affine", False))
         iter1_head_type = checkpoint.get("iter1_head_type", getattr(config, "iter1_head_type", None))
         split_node_head_type = checkpoint.get("split_node_head_type", getattr(config, "split_node_head_type", False))
@@ -155,6 +158,7 @@ class CheckpointManager:
             head_dropout,
             num_classes,
             head_type,
+            head_batch_norm,
             head_bn_affine,
             iter1_head_type,
             split_node_head_type,
@@ -170,6 +174,7 @@ class CheckpointManager:
             head_hidden_dim=head_hidden_dim,
             head_dropout=head_dropout,
             head_type=head_type,
+            head_batch_norm=head_batch_norm,
             head_bn_affine=head_bn_affine,
             iter1_head_type=iter1_head_type,
             split_node_head_type=split_node_head_type,
@@ -181,6 +186,44 @@ class CheckpointManager:
         return model
 
     @staticmethod
+    def _head_batch_norm_from_checkpoint(
+        checkpoint: Dict, config: Any
+    ) -> bool:
+        """Resolve head BatchNorm while preserving pre-flag checkpoints.
+
+        Older ISIC checkpoints omitted normalization modules entirely, whereas
+        later checkpoints include either BatchNorm state (iteration 2+) or an
+        Identity slot before each Linear layer (iteration 1). The state-dict
+        layout distinguishes both formats when the explicit flag is absent.
+        """
+        if "head_batch_norm" in checkpoint:
+            return bool(checkpoint["head_batch_norm"])
+
+        state_dict = checkpoint.get("model_state_dict", {})
+        head_keys = [
+            key
+            for key in state_dict
+            if key.startswith(("output_heads.", "parent_layers."))
+        ]
+        if not head_keys:
+            return bool(getattr(config, "head_batch_norm", True))
+        if any(
+            key.endswith(
+                ("running_mean", "running_var", "num_batches_tracked")
+            )
+            for key in head_keys
+        ):
+            return True
+
+        # BatchNorm-enabled iteration-1 heads use Identity at position 0, so
+        # their Linear classifier is at position 1. Legacy no-BN heads place
+        # that Linear layer directly at position 0.
+        if any(".classifier.1.weight" in key for key in head_keys):
+            return True
+
+        return False
+
+    @staticmethod
     def _reconstruct_parent_layers(
         hierarchical: str,
         iteration: int,
@@ -189,6 +232,7 @@ class CheckpointManager:
         head_dropout: float,
         num_classes: int = 2,
         head_type: str = "mlp",
+        head_batch_norm: bool = True,
         head_bn_affine: bool = False,
         iter1_head_type: Optional[str] = None,
         split_node_head_type: bool = False,
@@ -211,30 +255,32 @@ class CheckpointManager:
                 base_head_type = head_type
 
             def _make_norm(dim, use_id=use_identity):
-                return nn.Identity() if use_id else nn.BatchNorm1d(dim, affine=head_bn_affine)
+                if not head_batch_norm:
+                    return []
+                return [nn.Identity() if use_id else nn.BatchNorm1d(dim, affine=head_bn_affine)]
 
             def _make_single_head(ht, in_d=in_dim, hd=head_hidden_dim, do=head_dropout, ui=use_identity):
                 if ht == "mlp":
                     return HeadModule(
                         feature_extractor=nn.Sequential(
-                            _make_norm(in_d, ui),
+                            *_make_norm(in_d, ui),
                             nn.Linear(in_d, hd),
                             nn.ReLU(),
                             nn.Dropout(do),
                         ),
                         classifier=nn.Sequential(
-                            _make_norm(hd, ui),
+                            *_make_norm(hd, ui),
                             nn.Linear(hd, 1),
                         ),
                     )
                 else:
                     return HeadModule(
                         feature_extractor=nn.Sequential(
-                            _make_norm(in_d, ui),
+                            *_make_norm(in_d, ui),
                             nn.Linear(in_d, hd),
                         ),
                         classifier=nn.Sequential(
-                            _make_norm(hd, ui),
+                            *_make_norm(hd, ui),
                             nn.Linear(hd, 1),
                         ),
                     )

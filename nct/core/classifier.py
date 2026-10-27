@@ -29,6 +29,7 @@ from ..evaluation.analysis import analyze_hierarchical_nodes, compute_head_calib
 from ..evaluation.metrics import (
     calculate_basic_metrics,
     calculate_group_metrics,
+    calculate_dataset_multi_spurious_metrics,
     calculate_hierarchical_metrics,
     calculate_subgroup_auroc,
     compute_consolidated_group_metrics,
@@ -157,6 +158,7 @@ class NCTClassifier:
         self._class_names = class_names
         self._group_names = group_names
         self._test_subgroups = test_subgroups
+        self._dataset_name = dataset_name
 
         checkpoint_dir = self._base_checkpoint_dir
         attribution_dir = self._base_attribution_dir
@@ -221,7 +223,7 @@ class NCTClassifier:
         test_loader = self._create_iterative_loader(X, is_training=False)
         hierarchical_preds = self._get_hierarchical_predictions(test_loader)
         class_preds = node_to_class(
-            hierarchical_preds, self.config.num_iterations, self.config.num_classes
+            hierarchical_preds, self.model.iteration, self.config.num_classes
         )
         return class_preds.numpy()
 
@@ -242,7 +244,7 @@ class NCTClassifier:
         class_probs = []
         for class_id in range(self.config.num_classes):
             start_node, end_node = get_class_node_range(
-                class_id, self.config.num_iterations
+                class_id, self.model.iteration
             )
             class_raw = hierarchical_probs[:, start_node:end_node].sum(dim=1)
             class_probs.append(class_raw)
@@ -422,6 +424,8 @@ class NCTClassifier:
             group_names = self._group_names
         if test_subgroups is None and hasattr(self, "_test_subgroups"):
             test_subgroups = self._test_subgroups
+        if dataset_name == "generic" and hasattr(self, "_dataset_name"):
+            dataset_name = self._dataset_name
 
         binary_predictions = self.predict(X_test)
         binary_probabilities = self.predict_proba(X_test)
@@ -458,6 +462,13 @@ class NCTClassifier:
             )
             results["group_metrics"] = group_metrics
 
+            multi_spurious_metrics = calculate_dataset_multi_spurious_metrics(
+                dataset_name, y_test_np, binary_predictions, group_labels_np,
+                num_classes=self.config.num_classes,
+            )
+            if multi_spurious_metrics is not None:
+                results["multi_spurious_metrics"] = multi_spurious_metrics
+
             consolidated_metrics = compute_consolidated_group_metrics(
                 group_labels_np,
                 binary_predictions,
@@ -471,7 +482,7 @@ class NCTClassifier:
                 hierarchical_predictions,
                 torch.from_numpy(y_test_np),
                 torch.from_numpy(group_labels_np),
-                self.config.num_iterations,
+                self.model.iteration,
                 group_names,
                 verbose=self.config.verbose,
                 hierarchical=self.config.hierarchical_architecture,
@@ -544,7 +555,7 @@ class NCTClassifier:
                 if hasattr(self, "_class_names")
                 else ["Class 0", "Class 1"]
             ),
-            num_iterations=self.config.num_iterations,
+            num_iterations=self.model.iteration,
             hierarchical=self.config.hierarchical_architecture,
             attribution_method="layer_gradcam",
         )
@@ -658,6 +669,8 @@ class NCTClassifier:
 
         current_base_lr = self.config.initial_base_lr
         model = None
+        best_model = None
+        best_nodes_mask = None
 
         self.logger.training_start(self.config.to_dict())
 
@@ -718,6 +731,7 @@ class NCTClassifier:
                 head_type=self.config.head_type,
                 iter1_head_type=self.config.iter1_head_type,
                 split_node_head_type=self.config.split_node_head_type,
+                head_batch_norm=self.config.head_batch_norm,
                 head_bn_affine=self.config.head_bn_affine,
                 num_channels=self.config.num_channels,
                 image_size=self.config.image_size,
@@ -867,6 +881,14 @@ class NCTClassifier:
 
             last_trained_iter = i + 1
             should_stop = self._apply_depth_selection_check(iteration=i + 1)
+            if (
+                self.config.depth_selection_enabled
+                and self._depth_selection_state["best_iter"] == i + 1
+                and i + 1 < self.config.num_iterations
+            ):
+                # Later iterations reuse parent modules, so preserve their weights.
+                best_model = copy.deepcopy(model).cpu()
+                best_nodes_mask = self._trained_nodes_mask.clone()
             if should_stop and self.config.depth_selection_enabled:
                 self._depth_selection_state["early_stopped"] = True
                 break
@@ -896,6 +918,9 @@ class NCTClassifier:
 
         self._finalize_depth_selection(last_trained_iter=last_trained_iter)
 
+        if self._depth_selection_state["headline_iter"] != last_trained_iter:
+            model = best_model.to(self.device)
+            self._trained_nodes_mask = best_nodes_mask
         return model
 
     def _update_labels_for_next_iteration(
@@ -908,8 +933,10 @@ class NCTClassifier:
         current_iteration: int,
     ):
         """Update hierarchical labels for the next iteration."""
+        train_routing_dataset = copy.copy(base_train_dataset)
+        train_routing_dataset.transform = base_val_dataset.transform
         train_preds, is_correct_train = self._evaluate_for_routing(
-            base_train_dataset, train_labels, model
+            train_routing_dataset, train_labels, model
         )
         val_preds, is_correct_val = self._evaluate_for_routing(
             base_val_dataset, val_labels, model
@@ -1237,6 +1264,7 @@ class NCTClassifier:
         )
         group_results = None
         consolidated_group_results = None
+        multi_spurious_results = None
         if group_labels_np is not None:
             group_results = calculate_group_metrics(
                 y_test_np,
@@ -1251,6 +1279,15 @@ class NCTClassifier:
                 num_classes=self.config.num_classes,
                 num_groups=len(np.unique(group_labels_np)),
             )
+            multi_spurious_results = calculate_dataset_multi_spurious_metrics(
+                dataset_name, y_test_np, class_predictions_np, group_labels_np,
+                num_classes=self.config.num_classes,
+            )
+        self._iteration_results[entry_idx].update(
+            test_basic_metrics=basic_metrics,
+            test_group_metrics=group_results,
+            test_multi_spurious_metrics=multi_spurious_results,
+        )
         node_metrics = calculate_hierarchical_metrics(
             hierarchical_predictions_np, iteration, y_test_np, class_predictions_np
         )
@@ -1261,7 +1298,10 @@ class NCTClassifier:
         if subgroup_auroc:
             basic_metrics.update(subgroup_auroc)
 
-        self.logger.log_evaluation_results(basic_metrics, pseudo_metrics, group_results, consolidated_group_results, class_names=self._class_names)
+        self.logger.log_evaluation_results(
+            basic_metrics, pseudo_metrics, group_results, consolidated_group_results,
+            class_names=self._class_names, multi_spurious_results=multi_spurious_results,
+        )
 
         if iteration > 1:
             prev_result = self._iteration_results[entry_idx - 1]
@@ -1351,6 +1391,7 @@ class NCTClassifier:
             num_epochs_trained=num_epochs_trained,
             early_stopped=early_stopped,
             consolidated_group_metrics=consolidated_group_results,
+            multi_spurious_metrics=multi_spurious_results,
         )
 
     @staticmethod

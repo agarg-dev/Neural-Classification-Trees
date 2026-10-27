@@ -19,7 +19,7 @@ python src/train.py \
     --generate_attributions
 ```
 
-Supported datasets: `waterbird`, `celeba`, `isic`, `umnist`, `cmnist`.
+Supported datasets: `waterbird`, `celeba`, `isic`, `umnist`, `cmnist`, `urbancars`.
 
 ## Attribution Generation
 
@@ -46,6 +46,7 @@ Each dataset has a YAML config in `configs/`:
 | `isic.yaml` | ISIC | ResNet-50 | Skin lesion vs. colored patches |
 | `umnist.yaml` | UMNIST | LeNet-4 | Binary digit vs. digit-8 minority |
 | `cmnist.yaml` | CMNIST | LeNet-5 | 5-class digits vs. color (5 colors) |
+| `urbancars.yaml` | UrbanCars | ResNet-50 | Car type vs. background and co-occurring object |
 
 See `nct/core/config.py` for the full list of options.
 
@@ -56,8 +57,9 @@ Place datasets under `--data_dir`:
 - **Waterbirds** &mdash; <https://github.com/kohpangwei/group_DRO#waterbirds>
 - **CelebA** &mdash; <https://mmlab.ie.cuhk.edu.hk/projects/CelebA.html>
 - **ISIC** &mdash; <https://www.isic-archive.com/>
-- **UMNIST** &mdash; generated from MNIST (handled by data loading code)
-- **CMNIST** &mdash; 5-class colored MNIST variant; see the project's dataset preparation script
+- **UMNIST** &mdash; prepared undersampled MNIST images and `metadata.csv` under `data/umnist/`.
+- **CMNIST** &mdash; prepared 5-class colored MNIST images and `metadata.csv` under `data/cmnist/`.
+- **UrbanCars** &mdash; use the [official preparation script](https://github.com/facebookresearch/Whac-A-Mole/blob/main/scripts/prepare_dataset_models/create_urbancars.sh) and place its output under `data/urbancars/`.
 
 ## Method Summary
 
